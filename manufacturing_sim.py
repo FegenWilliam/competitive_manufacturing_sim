@@ -118,12 +118,12 @@ class Player:
         self.money = STARTING_MONEY
         self.current_month = 1
 
-        # Start with T1 unlocked for core parts, T0 for optional parts
+        # Start with T1-T5 unlocked for core parts, T1-T5 for optional parts
         self.unlocked_tiers: Dict[str, int] = {}
         for part in CORE_PARTS:
-            self.unlocked_tiers[part] = 1
+            self.unlocked_tiers[part] = 5
         for part in OPTIONAL_PARTS:
-            self.unlocked_tiers[part] = 0
+            self.unlocked_tiers[part] = 5
 
         # Ongoing R&D projects
         self.ongoing_rnd: List[RnDProject] = []
@@ -283,7 +283,7 @@ class Player:
 
         print(f"\n✓ Advanced to Month {self.current_month}")
 
-    def start_rnd(self, part_type: str, target_tier: int) -> bool:
+    def start_rnd(self, part_type: str, target_tier: int, min_tier: int = 1, max_tier: int = MAX_TIER) -> bool:
         """Start a new R&D project"""
         # Validate
         if part_type not in ALL_PARTS:
@@ -292,26 +292,10 @@ class Player:
 
         current_tier = self.unlocked_tiers[part_type]
 
-        # For optional parts starting at T0, allow T1 R&D
-        if current_tier == 0 and target_tier == 1:
-            # Special case: unlocking T1 for optional parts
-            cost, months = RND_CONFIG[2]  # Use T2 cost as baseline for T1 optional
-            cost = int(cost * 0.6)  # Make it cheaper than T2
-            months = 1
-
-            if self.money < cost:
-                print(f"❌ Insufficient funds. Need ${cost:,}, have ${self.money:,}")
-                return False
-
-            # Start the project
-            self.money -= cost
-            project = RnDProject(part_type, target_tier, months, cost)
-            self.ongoing_rnd.append(project)
-
-            print(f"\n✓ Started R&D for {part_type.capitalize()} T{target_tier}")
-            print(f"  Cost: ${cost:,} | Duration: {months} months")
-            print(f"  Remaining balance: ${self.money:,}")
-            return True
+        # Check if target tier is within available range
+        if target_tier < min_tier or target_tier > max_tier:
+            print(f"❌ Tier {target_tier} is not available. Available range: T{min_tier}-T{max_tier}")
+            return False
 
         if target_tier < 2 or target_tier > MAX_TIER:
             print(f"❌ Invalid tier: {target_tier}")
@@ -347,7 +331,8 @@ class Player:
         print(f"  Remaining balance: ${self.money:,}")
         return True
 
-    def create_blueprint(self, name: str, parts: Dict[str, int], sell_price: int) -> bool:
+    def create_blueprint(self, name: str, parts: Dict[str, int], sell_price: int,
+                        min_tier: int = 1, max_tier: int = MAX_TIER) -> bool:
         """Create a new phone blueprint"""
         # Check if name already exists
         for bp in self.blueprints:
@@ -362,6 +347,12 @@ class Player:
                 return False
 
             tier = parts[part]
+
+            # Check if tier is within available range
+            if tier < min_tier or tier > max_tier:
+                print(f"❌ {part.capitalize()} T{tier} is not available. Available range: T{min_tier}-T{max_tier}")
+                return False
+
             if tier > self.unlocked_tiers[part]:
                 print(f"❌ {part.capitalize()} T{tier} not yet unlocked (current: T{self.unlocked_tiers[part]})")
                 return False
@@ -369,9 +360,11 @@ class Player:
         # Validate optional parts
         fingerprint_tier = parts.get('fingerprint', 0)
         if fingerprint_tier > 0:
-            if self.unlocked_tiers['fingerprint'] == 0:
-                print(f"❌ Fingerprint not yet unlocked. Need to R&D Fingerprint T1 first.")
+            # Check if tier is within available range
+            if fingerprint_tier < min_tier or fingerprint_tier > max_tier:
+                print(f"❌ Fingerprint T{fingerprint_tier} is not available. Available range: T{min_tier}-T{max_tier}")
                 return False
+
             if fingerprint_tier > self.unlocked_tiers['fingerprint']:
                 print(f"❌ Fingerprint T{fingerprint_tier} not yet unlocked (current: T{self.unlocked_tiers['fingerprint']})")
                 return False
@@ -445,12 +438,18 @@ class Game:
     def __init__(self):
         self.players: List[Player] = []
         self.current_player_index = 0
+        self.global_month = 1  # Global game month
+        self.global_tech_level = 1  # Determines which 5 tiers are available (1 = tiers 1-5, 2 = tiers 2-6, etc.)
+        self.months_until_tech_advance = 36  # Tech advances every 3 years (36 months)
 
     def to_dict(self):
         """Convert game state to dictionary"""
         return {
             'players': [p.to_dict() for p in self.players],
             'current_player_index': self.current_player_index,
+            'global_month': self.global_month,
+            'global_tech_level': self.global_tech_level,
+            'months_until_tech_advance': self.months_until_tech_advance,
         }
 
     @staticmethod
@@ -459,7 +458,63 @@ class Game:
         game = Game()
         game.players = [Player.from_dict(p) for p in data['players']]
         game.current_player_index = data['current_player_index']
+        game.global_month = data.get('global_month', 1)
+        game.global_tech_level = data.get('global_tech_level', 1)
+        game.months_until_tech_advance = data.get('months_until_tech_advance', 36)
         return game
+
+    def get_available_tier_range(self):
+        """Get the current available tier range (min_tier, max_tier)"""
+        min_tier = self.global_tech_level
+        max_tier = self.global_tech_level + 4
+        return min_tier, max_tier
+
+    def advance_global_tech(self):
+        """Advance the global tech level (called every 36 months)"""
+        old_min, old_max = self.get_available_tier_range()
+        self.global_tech_level += 1
+        new_min, new_max = self.get_available_tier_range()
+
+        print(f"\n{'='*60}")
+        print(f"🚀 GLOBAL TECH ADVANCEMENT!")
+        print(f"{'='*60}")
+        print(f"Technology has advanced! Tier {old_min} components are now obsolete.")
+        print(f"New tier range: T{new_min} - T{new_max}")
+        print(f"All players now have access to the new tier T{new_max}")
+        print(f"{'='*60}")
+
+        # Update all players' unlocked tiers to include the new tier
+        for player in self.players:
+            for part in ALL_PARTS:
+                # Ensure all parts are at least at the new max tier
+                if player.unlocked_tiers[part] < new_max:
+                    player.unlocked_tiers[part] = new_max
+
+    def advance_game_month(self, player: Player):
+        """Advance the game month and handle global tech advancement"""
+        # Advance player's month
+        player.advance_month()
+
+        # Advance global month
+        self.global_month += 1
+        self.months_until_tech_advance -= 1
+
+        # Check if it's time for tech advancement
+        if self.months_until_tech_advance <= 0:
+            self.advance_global_tech()
+            self.months_until_tech_advance = 36  # Reset counter
+
+        # Display countdown to next tech advancement
+        years_remaining = self.months_until_tech_advance // 12
+        months_remaining = self.months_until_tech_advance % 12
+        min_tier, max_tier = self.get_available_tier_range()
+
+        print(f"\n📅 Global Month: {self.global_month}")
+        print(f"🔬 Current Tech Level: T{min_tier}-T{max_tier}")
+        if years_remaining > 0:
+            print(f"⏳ Next tech advancement in {years_remaining} year(s) and {months_remaining} month(s)")
+        else:
+            print(f"⏳ Next tech advancement in {months_remaining} month(s)")
 
     def save_game(self, filename: str = "savegame.json"):
         """Save game to JSON file"""
@@ -517,10 +572,13 @@ class Game:
 
     def menu_rnd(self, player: Player):
         """R&D menu"""
+        min_tier, max_tier = self.get_available_tier_range()
+
         while True:
             print("\n" + "="*60)
             print("R&D MENU")
             print("="*60)
+            print(f"Current tech level: T{min_tier}-T{max_tier}")
             player.display_unlocked_tiers()
             player.display_ongoing_rnd()
 
@@ -538,16 +596,13 @@ class Game:
                     current_tier = player.unlocked_tiers[part]
                     next_tier = current_tier + 1
 
-                    if current_tier == 0:
-                        # Optional part not yet unlocked
-                        cost = int(RND_CONFIG[2][0] * 0.6)
-                        months = 1
-                        print(f"{i}. {part.capitalize()} (Not unlocked, "
-                              f"Next: T1, Cost: ${cost:,}, Time: {months} month)")
-                    elif next_tier <= MAX_TIER:
+                    if next_tier <= max_tier and next_tier <= MAX_TIER:
                         cost, months = RND_CONFIG.get(next_tier, (0, 0))
                         print(f"{i}. {part.capitalize()} (Current: T{current_tier}, "
                               f"Next: T{next_tier}, Cost: ${cost:,}, Time: {months} months)")
+                    elif next_tier > max_tier:
+                        print(f"{i}. {part.capitalize()} (Current: T{current_tier}, "
+                              f"Next: T{next_tier} - not yet available, wait for tech advancement)")
                     else:
                         print(f"{i}. {part.capitalize()} (Current: T{current_tier}, MAX TIER REACHED)")
 
@@ -558,8 +613,8 @@ class Game:
                         current_tier = player.unlocked_tiers[part_type]
                         target_tier = current_tier + 1
 
-                        if current_tier == 0 or target_tier <= MAX_TIER:
-                            player.start_rnd(part_type, target_tier)
+                        if target_tier <= MAX_TIER:
+                            player.start_rnd(part_type, target_tier, min_tier, max_tier)
                         else:
                             print("❌ Already at maximum tier!")
                     else:
@@ -577,9 +632,12 @@ class Game:
 
     def menu_create_phone(self, player: Player):
         """Create phone blueprint menu"""
+        min_tier, max_tier = self.get_available_tier_range()
+
         print("\n" + "="*60)
         print("CREATE PHONE BLUEPRINT")
         print("="*60)
+        print(f"Current tech level: T{min_tier}-T{max_tier}")
         player.display_unlocked_tiers()
 
         name = input("\nEnter blueprint name: ").strip()
@@ -593,12 +651,13 @@ class Game:
         for part in CORE_PARTS:
             while True:
                 try:
-                    tier = int(input(f"  {part.capitalize()} (T1-T{player.unlocked_tiers[part]}): "))
-                    if 1 <= tier <= player.unlocked_tiers[part]:
+                    max_available = min(player.unlocked_tiers[part], max_tier)
+                    tier = int(input(f"  {part.capitalize()} (T{min_tier}-T{max_available}): "))
+                    if min_tier <= tier <= max_available:
                         parts[part] = tier
                         break
                     else:
-                        print(f"    Invalid. Must be between 1 and {player.unlocked_tiers[part]}")
+                        print(f"    Invalid. Must be between {min_tier} and {max_available}")
                 except ValueError:
                     print("    Invalid input")
 
@@ -608,12 +667,13 @@ class Game:
             if use_fingerprint == 'y':
                 while True:
                     try:
-                        tier = int(input(f"  Fingerprint tier (T1-T{player.unlocked_tiers['fingerprint']}): "))
-                        if 1 <= tier <= player.unlocked_tiers['fingerprint']:
+                        max_available = min(player.unlocked_tiers['fingerprint'], max_tier)
+                        tier = int(input(f"  Fingerprint tier (T{min_tier}-T{max_available}): "))
+                        if min_tier <= tier <= max_available:
                             parts['fingerprint'] = tier
                             break
                         else:
-                            print(f"    Invalid. Must be between 1 and {player.unlocked_tiers['fingerprint']}")
+                            print(f"    Invalid. Must be between {min_tier} and {max_available}")
                     except ValueError:
                         print("    Invalid input")
         else:
@@ -639,7 +699,7 @@ class Game:
             except ValueError:
                 print("Invalid input")
 
-        player.create_blueprint(name, parts, sell_price)
+        player.create_blueprint(name, parts, sell_price, min_tier, max_tier)
 
     def menu_manufacturing(self, player: Player):
         """Manufacturing menu"""
@@ -699,6 +759,18 @@ class Game:
         while True:
             player.display_status()
 
+            # Display global tech info
+            min_tier, max_tier = self.get_available_tier_range()
+            years_remaining = self.months_until_tech_advance // 12
+            months_remaining = self.months_until_tech_advance % 12
+
+            print(f"\n📅 Global Month: {self.global_month}")
+            print(f"🔬 Tech Level: T{min_tier}-T{max_tier}")
+            if years_remaining > 0:
+                print(f"⏳ Next tech advancement: {years_remaining}y {months_remaining}m")
+            else:
+                print(f"⏳ Next tech advancement: {months_remaining}m")
+
             print("\n--- MAIN MENU ---")
             print("1. Advance Month")
             print("2. Create Phone Blueprint")
@@ -712,7 +784,7 @@ class Game:
             choice = input("\nChoice: ").strip()
 
             if choice == '1':
-                player.advance_month()
+                self.advance_game_month(player)
                 input("\nPress Enter to continue...")
 
             elif choice == '2':
