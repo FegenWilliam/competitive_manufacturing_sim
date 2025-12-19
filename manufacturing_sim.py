@@ -281,6 +281,25 @@ class PhoneBlueprint:
             cost += PART_COSTS['fingerprint'][self.fingerprint_tier]
         return cost
 
+    def get_repair_return_rate(self):
+        """
+        Calculate the probability that a device will be returned for repairs.
+        Based on screen and casing quality:
+        - T1 screen + T1 casing: 5% return rate
+        - Each tier upgrade reduces by 0.25% per part
+        - T6 (Flagship): 2.5% return rate
+        - T10: 0% return rate
+        """
+        base_rate = 5.0  # 5% base return rate
+        screen_reduction = (self.screen_tier - 1) * 0.25
+        casing_reduction = (self.casing_tier - 1) * 0.25
+        return_rate = base_rate - screen_reduction - casing_reduction
+        return max(0.0, return_rate)  # Never go below 0%
+
+    def get_repair_cost(self):
+        """Calculate the cost to repair one unit (25% of production cost)"""
+        return int(self.get_production_cost() * 0.25)
+
     def calculate_score(self):
         """Calculate the phone's quality score based on component tiers and weights"""
         score = 0
@@ -367,6 +386,10 @@ class Player:
         # Track manufacturing units used this month
         self.manufacturing_used_this_month: int = 0
 
+        # Track sold devices and repairs (blueprint_name -> quantity)
+        self.sold_devices: Dict[str, int] = {}  # Total devices sold (for calculating repair returns)
+        self.pending_repairs: Dict[str, int] = {}  # Devices awaiting repair decision
+
     def to_dict(self):
         """Convert player to dictionary for JSON serialization"""
         return {
@@ -379,6 +402,8 @@ class Player:
             'manufactured_phones': self.manufactured_phones,
             'manufacturing_queue': self.manufacturing_queue,
             'manufacturing_used_this_month': self.manufacturing_used_this_month,
+            'sold_devices': self.sold_devices,
+            'pending_repairs': self.pending_repairs,
         }
 
     @staticmethod
@@ -393,6 +418,8 @@ class Player:
         player.manufactured_phones = data['manufactured_phones']
         player.manufacturing_queue = data.get('manufacturing_queue', [])
         player.manufacturing_used_this_month = data.get('manufacturing_used_this_month', 0)
+        player.sold_devices = data.get('sold_devices', {})
+        player.pending_repairs = data.get('pending_repairs', {})
         return player
 
     def display_status(self):
@@ -463,6 +490,31 @@ class Player:
 
         remaining_capacity = MANUFACTURING_LIMIT_PER_MONTH - self.manufacturing_used_this_month
         print(f"\nManufacturing capacity remaining this month: {remaining_capacity}/{MANUFACTURING_LIMIT_PER_MONTH}")
+
+    def display_pending_repairs(self):
+        """Display devices pending repair"""
+        if not self.pending_repairs:
+            print("\n--- No Pending Repairs ---")
+            return
+
+        print("\n--- Pending Repairs ---")
+        total_repair_cost = 0
+        for blueprint_name, quantity in self.pending_repairs.items():
+            # Find the blueprint to show repair cost
+            blueprint = None
+            for bp in self.blueprints:
+                if bp.name == blueprint_name:
+                    blueprint = bp
+                    break
+            if blueprint:
+                repair_cost_per_unit = blueprint.get_repair_cost()
+                total_cost = repair_cost_per_unit * quantity
+                total_repair_cost += total_cost
+                return_rate = blueprint.get_repair_return_rate()
+                print(f"  {blueprint_name}: {quantity} units @ ${repair_cost_per_unit}/unit = ${total_cost:,} total (Return rate: {return_rate:.2f}%)")
+
+        if total_repair_cost > 0:
+            print(f"\n  Total repair cost if fixing all: ${total_repair_cost:,}")
 
     def complete_manufacturing(self):
         """Complete manufacturing items that are ready (separate from advancing month)"""
@@ -673,6 +725,140 @@ class Player:
         self.manufacturing_queue.append((blueprint_name, quantity, months_to_complete))
         return True
 
+    def generate_monthly_repairs(self):
+        """
+        Generate repair returns based on sold devices.
+        Called at the start of each month to simulate device failures.
+        """
+        new_repairs = {}
+
+        for blueprint_name, sold_count in self.sold_devices.items():
+            if sold_count <= 0:
+                continue
+
+            # Find the blueprint to get return rate
+            blueprint = None
+            for bp in self.blueprints:
+                if bp.name == blueprint_name:
+                    blueprint = bp
+                    break
+
+            if not blueprint:
+                continue
+
+            # Calculate how many devices return for repair
+            return_rate = blueprint.get_repair_return_rate()
+            if return_rate > 0:
+                # Use probabilistic calculation: sold_count * (return_rate / 100)
+                expected_repairs = sold_count * (return_rate / 100.0)
+                # Add some randomness but keep it reasonable
+                repairs_this_month = int(expected_repairs)
+                # Add fractional chance (e.g., 2.7 expected = 2 guaranteed + 70% chance of 1 more)
+                if random.random() < (expected_repairs - repairs_this_month):
+                    repairs_this_month += 1
+
+                if repairs_this_month > 0:
+                    new_repairs[blueprint_name] = repairs_this_month
+
+        # Add new repairs to pending repairs
+        for blueprint_name, count in new_repairs.items():
+            if blueprint_name not in self.pending_repairs:
+                self.pending_repairs[blueprint_name] = 0
+            self.pending_repairs[blueprint_name] += count
+
+        return new_repairs
+
+    def repair_devices(self, blueprint_name: str, quantity: int) -> bool:
+        """
+        Repair a specified quantity of devices for a given blueprint.
+        Returns True if successful, False otherwise.
+        """
+        # Check if there are pending repairs for this blueprint
+        if blueprint_name not in self.pending_repairs or self.pending_repairs[blueprint_name] <= 0:
+            print(f"❌ No pending repairs for {blueprint_name}")
+            return False
+
+        # Check quantity
+        if quantity <= 0:
+            print(f"❌ Invalid quantity: {quantity}")
+            return False
+
+        if quantity > self.pending_repairs[blueprint_name]:
+            print(f"❌ Only {self.pending_repairs[blueprint_name]} units need repair")
+            return False
+
+        # Find the blueprint
+        blueprint = None
+        for bp in self.blueprints:
+            if bp.name == blueprint_name:
+                blueprint = bp
+                break
+
+        if not blueprint:
+            print(f"❌ Blueprint '{blueprint_name}' not found!")
+            return False
+
+        # Calculate repair cost
+        repair_cost_per_unit = blueprint.get_repair_cost()
+        total_cost = repair_cost_per_unit * quantity
+
+        # Check funds
+        if self.money < total_cost:
+            print(f"❌ Insufficient funds. Need ${total_cost:,}, have ${self.money:,}")
+            return False
+
+        # Complete the repair
+        self.money -= total_cost
+        self.pending_repairs[blueprint_name] -= quantity
+
+        # Remove from pending if none left
+        if self.pending_repairs[blueprint_name] <= 0:
+            del self.pending_repairs[blueprint_name]
+
+        print(f"\n✓ Repaired {quantity}x {blueprint_name}")
+        print(f"  Repair cost: ${total_cost:,}")
+        print(f"  Remaining balance: ${self.money:,}")
+        return True
+
+    def repair_all_devices(self) -> bool:
+        """
+        Repair all pending devices.
+        Returns True if successful, False otherwise.
+        """
+        if not self.pending_repairs:
+            print("❌ No pending repairs")
+            return False
+
+        # Calculate total cost
+        total_cost = 0
+        repair_list = []
+        for blueprint_name, quantity in self.pending_repairs.items():
+            blueprint = None
+            for bp in self.blueprints:
+                if bp.name == blueprint_name:
+                    blueprint = bp
+                    break
+            if blueprint:
+                repair_cost = blueprint.get_repair_cost() * quantity
+                total_cost += repair_cost
+                repair_list.append((blueprint_name, quantity, repair_cost))
+
+        # Check funds
+        if self.money < total_cost:
+            print(f"❌ Insufficient funds. Need ${total_cost:,}, have ${self.money:,}")
+            return False
+
+        # Complete all repairs
+        self.money -= total_cost
+        self.pending_repairs.clear()
+
+        print(f"\n✓ Repaired all devices:")
+        for blueprint_name, quantity, cost in repair_list:
+            print(f"  - {quantity}x {blueprint_name}: ${cost:,}")
+        print(f"\n  Total repair cost: ${total_cost:,}")
+        print(f"  Remaining balance: ${self.money:,}")
+        return True
+
 
 class CustomerMarket:
     """Manages the customer market and purchasing behavior"""
@@ -819,6 +1005,11 @@ class CustomerMarket:
                     best_player.manufactured_phones[best_phone.name] -= 1
                     best_player.money += best_phone.sell_price
 
+                    # Track sold devices for repair calculations
+                    if best_phone.name not in best_player.sold_devices:
+                        best_player.sold_devices[best_phone.name] = 0
+                    best_player.sold_devices[best_phone.name] += 1
+
                     # Track sales
                     sales_by_player[best_player.name] += 1
                     key = (best_player.name, best_phone.name)
@@ -958,6 +1149,29 @@ class Game:
         # 4. Advance each player's month (R&D progress, reset limits)
         for player in self.players:
             player.advance_month()
+
+        # 4.5. Generate repair returns for each player
+        print(f"\n--- Device Repairs ---")
+        any_repairs = False
+        for player in self.players:
+            new_repairs = player.generate_monthly_repairs()
+            if new_repairs:
+                any_repairs = True
+                print(f"\n🔧 {player.name} - Devices Returned for Repair:")
+                for blueprint_name, count in new_repairs.items():
+                    # Find blueprint to show repair cost
+                    blueprint = None
+                    for bp in player.blueprints:
+                        if bp.name == blueprint_name:
+                            blueprint = bp
+                            break
+                    if blueprint:
+                        repair_cost = blueprint.get_repair_cost()
+                        return_rate = blueprint.get_repair_return_rate()
+                        print(f"  - {count}x {blueprint_name} (Return rate: {return_rate:.2f}%, Cost: ${repair_cost}/unit)")
+
+        if not any_repairs:
+            print("  No devices returned for repair this month.")
 
         # 5. Check if it's time for tech advancement
         if self.months_until_tech_advance <= 0:
@@ -1263,6 +1477,77 @@ class Game:
             elif choice == '2':
                 break
 
+    def menu_repairs(self, player: Player):
+        """Device repair menu"""
+        while True:
+            print("\n" + "="*60)
+            print("DEVICE REPAIRS")
+            print("="*60)
+            player.display_pending_repairs()
+
+            if not player.pending_repairs:
+                print("\n✓ No devices need repair at this time!")
+                input("\nPress Enter to continue...")
+                break
+
+            print("\nActions:")
+            print("1. Repair specific device model")
+            print("2. Repair all devices")
+            # TODO: Add "Reject Repair" option
+            # This would allow players to reject repairs for specific models
+            # Should apply a brand reputation penalty (not yet implemented - needs brand system)
+            # When brand system is added, rejecting repairs should:
+            #   - Remove devices from pending_repairs without paying
+            #   - Decrease brand reputation/loyalty score
+            #   - Potentially affect future sales in that market tier
+            print("3. Back to main menu")
+
+            choice = input("\nChoice: ").strip()
+
+            if choice == '1':
+                # Select specific blueprint to repair
+                print("\nSelect device model to repair:")
+                blueprint_list = list(player.pending_repairs.keys())
+                for i, blueprint_name in enumerate(blueprint_list, 1):
+                    quantity = player.pending_repairs[blueprint_name]
+                    # Find blueprint to show repair cost
+                    blueprint = None
+                    for bp in player.blueprints:
+                        if bp.name == blueprint_name:
+                            blueprint = bp
+                            break
+                    if blueprint:
+                        repair_cost = blueprint.get_repair_cost()
+                        print(f"{i}. {blueprint_name}: {quantity} units @ ${repair_cost}/unit")
+
+                try:
+                    model_choice = int(input("\nModel number: ")) - 1
+                    if 0 <= model_choice < len(blueprint_list):
+                        blueprint_name = blueprint_list[model_choice]
+                        max_quantity = player.pending_repairs[blueprint_name]
+                        print(f"\nPending repairs for {blueprint_name}: {max_quantity} units")
+                        quantity = int(input(f"How many to repair (1-{max_quantity}): "))
+
+                        if 1 <= quantity <= max_quantity:
+                            player.repair_devices(blueprint_name, quantity)
+                        else:
+                            print(f"❌ Invalid quantity. Must be between 1 and {max_quantity}")
+                    else:
+                        print("❌ Invalid selection")
+                except ValueError:
+                    print("❌ Invalid input")
+
+            elif choice == '2':
+                # Repair all
+                confirm = input("\nRepair all devices? This will repair all pending repairs. (y/n): ").strip().lower()
+                if confirm == 'y':
+                    player.repair_all_devices()
+                else:
+                    print("❌ Cancelled")
+
+            elif choice == '3':
+                break
+
     def main_menu(self):
         """Main game menu"""
         player = self.get_current_player()
@@ -1286,12 +1571,18 @@ class Game:
             print("1. Advance Month")
             print("2. Create Phone Blueprint")
             print("3. Manufacturing")
-            print("4. R&D")
-            print("5. View Status")
-            print("6. View Customer Market")
-            print("7. Save Game")
-            print("8. Next Player" if len(self.players) > 1 else "8. (Single Player)")
-            print("9. Quit")
+            # Show notification if there are pending repairs
+            if player.pending_repairs:
+                total_pending = sum(player.pending_repairs.values())
+                print(f"4. Device Repairs (⚠️  {total_pending} devices awaiting repair)")
+            else:
+                print("4. Device Repairs")
+            print("5. R&D")
+            print("6. View Status")
+            print("7. View Customer Market")
+            print("8. Save Game")
+            print("9. Next Player" if len(self.players) > 1 else "9. (Single Player)")
+            print("10. Quit")
 
             choice = input("\nChoice: ").strip()
 
@@ -1322,32 +1613,36 @@ class Game:
                 self.menu_manufacturing(player)
 
             elif choice == '4':
-                self.menu_rnd(player)
+                self.menu_repairs(player)
 
             elif choice == '5':
+                self.menu_rnd(player)
+
+            elif choice == '6':
                 player.display_status()
                 player.display_unlocked_tiers()
                 player.display_ongoing_rnd()
                 player.display_blueprints(self.global_tech_level)
                 player.display_manufacturing_queue()
                 player.display_manufactured_phones()
+                player.display_pending_repairs()
                 input("\nPress Enter to continue...")
 
-            elif choice == '6':
+            elif choice == '7':
                 if self.customer_market.customers:
                     self.customer_market.display_customer_breakdown()
                 else:
                     print("\n❌ No customer data yet. Advance to next month to generate customers.")
                 input("\nPress Enter to continue...")
 
-            elif choice == '7':
+            elif choice == '8':
                 filename = input("Enter filename (default: savegame.json): ").strip()
                 if not filename:
                     filename = "savegame.json"
                 self.save_game(filename)
                 input("\nPress Enter to continue...")
 
-            elif choice == '8':
+            elif choice == '9':
                 if len(self.players) > 1:
                     self.next_player()
                     print(f"\n>>> Switching to {self.get_current_player().name} <<<")
@@ -1357,7 +1652,7 @@ class Game:
                     print("Single player mode - no other players")
                     input("\nPress Enter to continue...")
 
-            elif choice == '9':
+            elif choice == '10':
                 confirm = input("\nQuit game? (y/n): ").strip().lower()
                 if confirm == 'y':
                     return 'quit'
