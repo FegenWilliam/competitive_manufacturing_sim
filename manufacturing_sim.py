@@ -11,12 +11,12 @@ from dataclasses import dataclass, asdict
 
 
 # Game constants
-PART_TYPES = ['ram', 'soc', 'screen', 'battery', 'camera', 'casing']
+CORE_PARTS = ['ram', 'soc', 'screen', 'battery', 'camera', 'casing', 'storage']
 OPTIONAL_PARTS = ['fingerprint']
-ALL_PARTS = PART_TYPES + OPTIONAL_PARTS
+ALL_PARTS = CORE_PARTS + OPTIONAL_PARTS
 MAX_TIER = 10
 STARTING_MONEY = 100000
-STARTING_TIER = 1
+MANUFACTURING_LIMIT_PER_MONTH = 1000
 
 # R&D costs and time (tier: (cost, months))
 RND_CONFIG = {
@@ -72,6 +72,7 @@ class PhoneBlueprint:
     battery_tier: int
     camera_tier: int
     casing_tier: int
+    storage_tier: int
     fingerprint_tier: int  # 0 means no fingerprint
     sell_price: int
 
@@ -91,6 +92,7 @@ class PhoneBlueprint:
         cost += PART_COST_PER_TIER[self.battery_tier]
         cost += PART_COST_PER_TIER[self.camera_tier]
         cost += PART_COST_PER_TIER[self.casing_tier]
+        cost += PART_COST_PER_TIER[self.storage_tier]
         if self.fingerprint_tier > 0:
             cost += PART_COST_PER_TIER[self.fingerprint_tier]
         return cost
@@ -98,7 +100,7 @@ class PhoneBlueprint:
     def display(self):
         """Display blueprint details"""
         print(f"\n  Blueprint: {self.name}")
-        print(f"  RAM: T{self.ram_tier} | SoC: T{self.soc_tier} | Screen: T{self.screen_tier}")
+        print(f"  RAM: T{self.ram_tier} | SoC: T{self.soc_tier} | Screen: T{self.screen_tier} | Storage: T{self.storage_tier}")
         print(f"  Battery: T{self.battery_tier} | Camera: T{self.camera_tier} | Casing: T{self.casing_tier}")
         if self.fingerprint_tier > 0:
             print(f"  Fingerprint: T{self.fingerprint_tier}")
@@ -116,8 +118,12 @@ class Player:
         self.money = STARTING_MONEY
         self.current_month = 1
 
-        # Start with T1 unlocked for all parts
-        self.unlocked_tiers: Dict[str, int] = {part: STARTING_TIER for part in ALL_PARTS}
+        # Start with T1 unlocked for core parts, T0 for optional parts
+        self.unlocked_tiers: Dict[str, int] = {}
+        for part in CORE_PARTS:
+            self.unlocked_tiers[part] = 1
+        for part in OPTIONAL_PARTS:
+            self.unlocked_tiers[part] = 0
 
         # Ongoing R&D projects
         self.ongoing_rnd: List[RnDProject] = []
@@ -125,11 +131,14 @@ class Player:
         # Phone blueprints
         self.blueprints: List[PhoneBlueprint] = []
 
-        # Inventory of parts (part_type -> {tier -> quantity})
-        self.inventory: Dict[str, Dict[int, int]] = {part: {} for part in ALL_PARTS}
-
         # Manufactured phones ready to sell (blueprint_name -> quantity)
         self.manufactured_phones: Dict[str, int] = {}
+
+        # Manufacturing queue (blueprint_name, quantity, months_remaining)
+        self.manufacturing_queue: List[tuple] = []
+
+        # Track manufacturing units used this month
+        self.manufacturing_used_this_month: int = 0
 
     def to_dict(self):
         """Convert player to dictionary for JSON serialization"""
@@ -140,8 +149,9 @@ class Player:
             'unlocked_tiers': self.unlocked_tiers,
             'ongoing_rnd': [proj.to_dict() for proj in self.ongoing_rnd],
             'blueprints': [bp.to_dict() for bp in self.blueprints],
-            'inventory': self.inventory,
             'manufactured_phones': self.manufactured_phones,
+            'manufacturing_queue': self.manufacturing_queue,
+            'manufacturing_used_this_month': self.manufacturing_used_this_month,
         }
 
     @staticmethod
@@ -153,8 +163,9 @@ class Player:
         player.unlocked_tiers = data['unlocked_tiers']
         player.ongoing_rnd = [RnDProject.from_dict(proj) for proj in data['ongoing_rnd']]
         player.blueprints = [PhoneBlueprint.from_dict(bp) for bp in data['blueprints']]
-        player.inventory = data['inventory']
         player.manufactured_phones = data['manufactured_phones']
+        player.manufacturing_queue = data.get('manufacturing_queue', [])
+        player.manufacturing_used_this_month = data.get('manufacturing_used_this_month', 0)
         return player
 
     def display_status(self):
@@ -167,10 +178,16 @@ class Player:
     def display_unlocked_tiers(self):
         """Display unlocked tiers for all parts"""
         print("\n--- Unlocked Tiers ---")
-        for part in PART_TYPES:
+        print("Core parts:")
+        for part in CORE_PARTS:
             print(f"  {part.capitalize()}: T{self.unlocked_tiers[part]}")
+        print("Optional parts:")
         for part in OPTIONAL_PARTS:
-            print(f"  {part.capitalize()} (optional): T{self.unlocked_tiers[part]}")
+            tier = self.unlocked_tiers[part]
+            if tier == 0:
+                print(f"  {part.capitalize()}: Not unlocked (need R&D)")
+            else:
+                print(f"  {part.capitalize()}: T{tier}")
 
     def display_ongoing_rnd(self):
         """Display ongoing R&D projects"""
@@ -182,19 +199,6 @@ class Player:
         for i, proj in enumerate(self.ongoing_rnd, 1):
             print(f"  {i}. {proj.part_type.capitalize()} T{proj.target_tier} - "
                   f"{proj.months_remaining} months remaining")
-
-    def display_inventory(self):
-        """Display parts inventory"""
-        print("\n--- Parts Inventory ---")
-        has_parts = False
-        for part in ALL_PARTS:
-            if self.inventory[part]:
-                for tier, qty in sorted(self.inventory[part].items()):
-                    if qty > 0:
-                        print(f"  {part.capitalize()} T{tier}: {qty} units")
-                        has_parts = True
-        if not has_parts:
-            print("  No parts in inventory")
 
     def display_blueprints(self):
         """Display all phone blueprints"""
@@ -217,11 +221,31 @@ class Player:
         for name, qty in self.manufactured_phones.items():
             print(f"  {name}: {qty} units")
 
-    def advance_month(self):
-        """Advance to next month and update R&D projects"""
-        self.current_month += 1
-        completed_projects = []
+    def display_manufacturing_queue(self):
+        """Display manufacturing queue"""
+        if not self.manufacturing_queue:
+            print("\n--- No phones in manufacturing ---")
+            return
 
+        print("\n--- Manufacturing Queue ---")
+        for i, (blueprint_name, quantity, months_remaining) in enumerate(self.manufacturing_queue, 1):
+            if months_remaining == 1:
+                print(f"  {i}. {blueprint_name}: {quantity} units (completes next month)")
+            else:
+                print(f"  {i}. {blueprint_name}: {quantity} units ({months_remaining} months remaining)")
+
+        remaining_capacity = MANUFACTURING_LIMIT_PER_MONTH - self.manufacturing_used_this_month
+        print(f"\nManufacturing capacity remaining this month: {remaining_capacity}/{MANUFACTURING_LIMIT_PER_MONTH}")
+
+    def advance_month(self):
+        """Advance to next month and update R&D projects and manufacturing"""
+        self.current_month += 1
+
+        # Reset manufacturing limit for new month
+        self.manufacturing_used_this_month = 0
+
+        # Update R&D projects
+        completed_projects = []
         for proj in self.ongoing_rnd:
             proj.months_remaining -= 1
             if proj.months_remaining <= 0:
@@ -237,6 +261,26 @@ class Player:
             for proj in completed_projects:
                 print(f"  - {proj.part_type.capitalize()} T{proj.target_tier} unlocked!")
 
+        # Update manufacturing queue
+        completed_manufacturing = []
+        for i, (blueprint_name, quantity, months_remaining) in enumerate(self.manufacturing_queue):
+            months_remaining -= 1
+            if months_remaining <= 0:
+                completed_manufacturing.append((blueprint_name, quantity))
+                if blueprint_name not in self.manufactured_phones:
+                    self.manufactured_phones[blueprint_name] = 0
+                self.manufactured_phones[blueprint_name] += quantity
+            else:
+                self.manufacturing_queue[i] = (blueprint_name, quantity, months_remaining)
+
+        # Remove completed manufacturing
+        self.manufacturing_queue = [(name, qty, months) for (name, qty, months) in self.manufacturing_queue if months > 0]
+
+        if completed_manufacturing:
+            print(f"\n📦 Manufacturing Completed:")
+            for name, qty in completed_manufacturing:
+                print(f"  - {qty}x {name} ready to sell!")
+
         print(f"\n✓ Advanced to Month {self.current_month}")
 
     def start_rnd(self, part_type: str, target_tier: int) -> bool:
@@ -246,16 +290,39 @@ class Player:
             print(f"❌ Invalid part type: {part_type}")
             return False
 
+        current_tier = self.unlocked_tiers[part_type]
+
+        # For optional parts starting at T0, allow T1 R&D
+        if current_tier == 0 and target_tier == 1:
+            # Special case: unlocking T1 for optional parts
+            cost, months = RND_CONFIG[2]  # Use T2 cost as baseline for T1 optional
+            cost = int(cost * 0.6)  # Make it cheaper than T2
+            months = 1
+
+            if self.money < cost:
+                print(f"❌ Insufficient funds. Need ${cost:,}, have ${self.money:,}")
+                return False
+
+            # Start the project
+            self.money -= cost
+            project = RnDProject(part_type, target_tier, months, cost)
+            self.ongoing_rnd.append(project)
+
+            print(f"\n✓ Started R&D for {part_type.capitalize()} T{target_tier}")
+            print(f"  Cost: ${cost:,} | Duration: {months} months")
+            print(f"  Remaining balance: ${self.money:,}")
+            return True
+
         if target_tier < 2 or target_tier > MAX_TIER:
             print(f"❌ Invalid tier: {target_tier}")
             return False
 
-        if target_tier <= self.unlocked_tiers[part_type]:
+        if target_tier <= current_tier:
             print(f"❌ {part_type.capitalize()} T{target_tier} is already unlocked!")
             return False
 
-        if target_tier > self.unlocked_tiers[part_type] + 1:
-            print(f"❌ Must unlock tiers sequentially. Current: T{self.unlocked_tiers[part_type]}")
+        if target_tier > current_tier + 1:
+            print(f"❌ Must unlock tiers sequentially. Current: T{current_tier}")
             return False
 
         # Check if already researching this
@@ -289,7 +356,7 @@ class Player:
                 return False
 
         # Validate all mandatory parts are specified
-        for part in PART_TYPES:
+        for part in CORE_PARTS:
             if part not in parts:
                 print(f"❌ Missing mandatory part: {part}")
                 return False
@@ -301,9 +368,13 @@ class Player:
 
         # Validate optional parts
         fingerprint_tier = parts.get('fingerprint', 0)
-        if fingerprint_tier > 0 and fingerprint_tier > self.unlocked_tiers['fingerprint']:
-            print(f"❌ Fingerprint T{fingerprint_tier} not yet unlocked (current: T{self.unlocked_tiers['fingerprint']})")
-            return False
+        if fingerprint_tier > 0:
+            if self.unlocked_tiers['fingerprint'] == 0:
+                print(f"❌ Fingerprint not yet unlocked. Need to R&D Fingerprint T1 first.")
+                return False
+            if fingerprint_tier > self.unlocked_tiers['fingerprint']:
+                print(f"❌ Fingerprint T{fingerprint_tier} not yet unlocked (current: T{self.unlocked_tiers['fingerprint']})")
+                return False
 
         blueprint = PhoneBlueprint(
             name=name,
@@ -313,6 +384,7 @@ class Player:
             battery_tier=parts['battery'],
             camera_tier=parts['camera'],
             casing_tier=parts['casing'],
+            storage_tier=parts['storage'],
             fingerprint_tier=fingerprint_tier,
             sell_price=sell_price
         )
@@ -322,41 +394,8 @@ class Player:
         blueprint.display()
         return True
 
-    def order_parts(self, part_type: str, tier: int, quantity: int) -> bool:
-        """Order parts for inventory"""
-        if part_type not in ALL_PARTS:
-            print(f"❌ Invalid part type: {part_type}")
-            return False
-
-        if tier > self.unlocked_tiers[part_type]:
-            print(f"❌ {part_type.capitalize()} T{tier} not yet unlocked!")
-            return False
-
-        if tier < 1 or tier > MAX_TIER:
-            print(f"❌ Invalid tier: {tier}")
-            return False
-
-        if quantity < 1:
-            print(f"❌ Invalid quantity: {quantity}")
-            return False
-
-        cost = PART_COST_PER_TIER[tier] * quantity
-
-        if self.money < cost:
-            print(f"❌ Insufficient funds. Need ${cost:,}, have ${self.money:,}")
-            return False
-
-        self.money -= cost
-        if tier not in self.inventory[part_type]:
-            self.inventory[part_type][tier] = 0
-        self.inventory[part_type][tier] += quantity
-
-        print(f"\n✓ Ordered {quantity}x {part_type.capitalize()} T{tier} for ${cost:,}")
-        print(f"  Remaining balance: ${self.money:,}")
-        return True
-
     def manufacture_phone(self, blueprint_name: str, quantity: int) -> bool:
-        """Manufacture phones based on a blueprint"""
+        """Start manufacturing phones based on a blueprint"""
         # Find blueprint
         blueprint = None
         for bp in self.blueprints:
@@ -372,37 +411,31 @@ class Player:
             print(f"❌ Invalid quantity: {quantity}")
             return False
 
-        # Check if we have enough parts
-        parts_needed = {
-            'ram': blueprint.ram_tier,
-            'soc': blueprint.soc_tier,
-            'screen': blueprint.screen_tier,
-            'battery': blueprint.battery_tier,
-            'camera': blueprint.camera_tier,
-            'casing': blueprint.casing_tier,
-        }
+        # Check manufacturing capacity
+        remaining_capacity = MANUFACTURING_LIMIT_PER_MONTH - self.manufacturing_used_this_month
+        if quantity > remaining_capacity:
+            print(f"❌ Insufficient manufacturing capacity. Can only manufacture {remaining_capacity} more units this month.")
+            print(f"   (Monthly limit: {MANUFACTURING_LIMIT_PER_MONTH}, already used: {self.manufacturing_used_this_month})")
+            return False
 
-        if blueprint.fingerprint_tier > 0:
-            parts_needed['fingerprint'] = blueprint.fingerprint_tier
+        # Calculate total cost (parts are bought instantly)
+        cost_per_unit = blueprint.get_production_cost()
+        total_cost = cost_per_unit * quantity
 
-        # Validate inventory
-        for part, tier in parts_needed.items():
-            available = self.inventory[part].get(tier, 0)
-            if available < quantity:
-                print(f"❌ Insufficient {part.capitalize()} T{tier}. Need {quantity}, have {available}")
-                return False
+        if self.money < total_cost:
+            print(f"❌ Insufficient funds. Need ${total_cost:,}, have ${self.money:,}")
+            return False
 
-        # Deduct parts from inventory
-        for part, tier in parts_needed.items():
-            self.inventory[part][tier] -= quantity
+        # Deduct money and add to manufacturing queue
+        self.money -= total_cost
+        self.manufacturing_used_this_month += quantity
+        self.manufacturing_queue.append((blueprint_name, quantity, 1))  # Takes 1 month
 
-        # Add manufactured phones
-        if blueprint_name not in self.manufactured_phones:
-            self.manufactured_phones[blueprint_name] = 0
-        self.manufactured_phones[blueprint_name] += quantity
-
-        print(f"\n✓ Manufactured {quantity}x {blueprint_name}")
-        print(f"  Total inventory: {self.manufactured_phones[blueprint_name]} units")
+        print(f"\n✓ Started manufacturing {quantity}x {blueprint_name}")
+        print(f"  Parts cost: ${total_cost:,}")
+        print(f"  Will complete in 1 month (Month {self.current_month + 1})")
+        print(f"  Remaining balance: ${self.money:,}")
+        print(f"  Manufacturing capacity used: {self.manufacturing_used_this_month}/{MANUFACTURING_LIMIT_PER_MONTH}")
         return True
 
 
@@ -504,7 +537,14 @@ class Game:
                 for i, part in enumerate(ALL_PARTS, 1):
                     current_tier = player.unlocked_tiers[part]
                     next_tier = current_tier + 1
-                    if next_tier <= MAX_TIER:
+
+                    if current_tier == 0:
+                        # Optional part not yet unlocked
+                        cost = int(RND_CONFIG[2][0] * 0.6)
+                        months = 1
+                        print(f"{i}. {part.capitalize()} (Not unlocked, "
+                              f"Next: T1, Cost: ${cost:,}, Time: {months} month)")
+                    elif next_tier <= MAX_TIER:
                         cost, months = RND_CONFIG.get(next_tier, (0, 0))
                         print(f"{i}. {part.capitalize()} (Current: T{current_tier}, "
                               f"Next: T{next_tier}, Cost: ${cost:,}, Time: {months} months)")
@@ -515,9 +555,10 @@ class Game:
                     part_choice = int(input("\nSelect part (number): ")) - 1
                     if 0 <= part_choice < len(ALL_PARTS):
                         part_type = ALL_PARTS[part_choice]
-                        target_tier = player.unlocked_tiers[part_type] + 1
+                        current_tier = player.unlocked_tiers[part_type]
+                        target_tier = current_tier + 1
 
-                        if target_tier <= MAX_TIER:
+                        if current_tier == 0 or target_tier <= MAX_TIER:
                             player.start_rnd(part_type, target_tier)
                         else:
                             print("❌ Already at maximum tier!")
@@ -548,8 +589,8 @@ class Game:
 
         parts = {}
 
-        print("\nEnter tier for each part:")
-        for part in PART_TYPES:
+        print("\nEnter tier for each core part:")
+        for part in CORE_PARTS:
             while True:
                 try:
                     tier = int(input(f"  {part.capitalize()} (T1-T{player.unlocked_tiers[part]}): "))
@@ -562,22 +603,25 @@ class Game:
                     print("    Invalid input")
 
         # Optional fingerprint
-        use_fingerprint = input("\nInclude fingerprint sensor? (y/n): ").strip().lower()
-        if use_fingerprint == 'y':
-            while True:
-                try:
-                    tier = int(input(f"  Fingerprint tier (T1-T{player.unlocked_tiers['fingerprint']}): "))
-                    if 1 <= tier <= player.unlocked_tiers['fingerprint']:
-                        parts['fingerprint'] = tier
-                        break
-                    else:
-                        print(f"    Invalid. Must be between 1 and {player.unlocked_tiers['fingerprint']}")
-                except ValueError:
-                    print("    Invalid input")
+        if player.unlocked_tiers['fingerprint'] > 0:
+            use_fingerprint = input("\nInclude fingerprint sensor? (y/n): ").strip().lower()
+            if use_fingerprint == 'y':
+                while True:
+                    try:
+                        tier = int(input(f"  Fingerprint tier (T1-T{player.unlocked_tiers['fingerprint']}): "))
+                        if 1 <= tier <= player.unlocked_tiers['fingerprint']:
+                            parts['fingerprint'] = tier
+                            break
+                        else:
+                            print(f"    Invalid. Must be between 1 and {player.unlocked_tiers['fingerprint']}")
+                    except ValueError:
+                        print("    Invalid input")
+        else:
+            print("\nFingerprint sensor not available (need to R&D first)")
 
         # Calculate suggested price
         suggested_cost = 0
-        for part in PART_TYPES:
+        for part in CORE_PARTS:
             suggested_cost += PART_COST_PER_TIER[parts[part]]
         if 'fingerprint' in parts:
             suggested_cost += PART_COST_PER_TIER[parts['fingerprint']]
@@ -597,55 +641,6 @@ class Game:
 
         player.create_blueprint(name, parts, sell_price)
 
-    def menu_order_parts(self, player: Player):
-        """Order parts menu"""
-        while True:
-            print("\n" + "="*60)
-            print("ORDER PARTS")
-            print("="*60)
-            player.display_unlocked_tiers()
-            player.display_inventory()
-            print(f"\nCurrent balance: ${player.money:,}")
-
-            print("\nSelect part type:")
-            for i, part in enumerate(ALL_PARTS, 1):
-                print(f"{i}. {part.capitalize()}")
-            print(f"{len(ALL_PARTS)+1}. Back to main menu")
-
-            try:
-                choice = int(input("\nChoice: "))
-                if choice == len(ALL_PARTS) + 1:
-                    break
-
-                if 1 <= choice <= len(ALL_PARTS):
-                    part_type = ALL_PARTS[choice - 1]
-                    max_tier = player.unlocked_tiers[part_type]
-
-                    print(f"\nSelect tier (1-{max_tier}):")
-                    for t in range(1, max_tier + 1):
-                        print(f"  T{t}: ${PART_COST_PER_TIER[t]} per unit")
-
-                    tier = int(input("Tier: "))
-                    if tier < 1 or tier > max_tier:
-                        print("❌ Invalid tier")
-                        continue
-
-                    quantity = int(input("Quantity: "))
-                    if quantity < 1:
-                        print("❌ Invalid quantity")
-                        continue
-
-                    total_cost = PART_COST_PER_TIER[tier] * quantity
-                    print(f"\nTotal cost: ${total_cost:,}")
-                    confirm = input("Confirm order? (y/n): ").strip().lower()
-
-                    if confirm == 'y':
-                        player.order_parts(part_type, tier, quantity)
-                else:
-                    print("❌ Invalid selection")
-            except ValueError:
-                print("❌ Invalid input")
-
     def menu_manufacturing(self, player: Player):
         """Manufacturing menu"""
         while True:
@@ -653,7 +648,7 @@ class Game:
             print("MANUFACTURING")
             print("="*60)
             player.display_blueprints()
-            player.display_inventory()
+            player.display_manufacturing_queue()
             player.display_manufactured_phones()
 
             if not player.blueprints:
@@ -662,20 +657,27 @@ class Game:
                 break
 
             print("\nActions:")
-            print("1. Manufacture phones")
+            print("1. Start manufacturing phones")
             print("2. Back to main menu")
 
             choice = input("\nChoice: ").strip()
 
             if choice == '1':
+                remaining_capacity = MANUFACTURING_LIMIT_PER_MONTH - player.manufacturing_used_this_month
+                if remaining_capacity <= 0:
+                    print("\n❌ No manufacturing capacity remaining this month!")
+                    input("\nPress Enter to continue...")
+                    continue
+
                 print("\nSelect blueprint:")
                 for i, bp in enumerate(player.blueprints, 1):
-                    print(f"{i}. {bp.name} (Cost: ${bp.get_production_cost()}/unit)")
+                    print(f"{i}. {bp.name} (Cost: ${bp.get_production_cost()}/unit, Profit: ${bp.sell_price - bp.get_production_cost()}/unit)")
 
                 try:
                     bp_choice = int(input("\nBlueprint number: ")) - 1
                     if 0 <= bp_choice < len(player.blueprints):
                         blueprint = player.blueprints[bp_choice]
+                        print(f"\nManufacturing capacity remaining: {remaining_capacity} units")
                         quantity = int(input("Quantity to manufacture: "))
 
                         if quantity > 0:
@@ -700,13 +702,12 @@ class Game:
             print("\n--- MAIN MENU ---")
             print("1. Advance Month")
             print("2. Create Phone Blueprint")
-            print("3. Order Parts")
-            print("4. Manufacturing")
-            print("5. R&D")
-            print("6. View Status")
-            print("7. Save Game")
-            print("8. Next Player" if len(self.players) > 1 else "8. (Single Player)")
-            print("9. Quit")
+            print("3. Manufacturing")
+            print("4. R&D")
+            print("5. View Status")
+            print("6. Save Game")
+            print("7. Next Player" if len(self.players) > 1 else "7. (Single Player)")
+            print("8. Quit")
 
             choice = input("\nChoice: ").strip()
 
@@ -718,31 +719,28 @@ class Game:
                 self.menu_create_phone(player)
 
             elif choice == '3':
-                self.menu_order_parts(player)
-
-            elif choice == '4':
                 self.menu_manufacturing(player)
 
-            elif choice == '5':
+            elif choice == '4':
                 self.menu_rnd(player)
 
-            elif choice == '6':
+            elif choice == '5':
                 player.display_status()
                 player.display_unlocked_tiers()
                 player.display_ongoing_rnd()
-                player.display_inventory()
                 player.display_blueprints()
+                player.display_manufacturing_queue()
                 player.display_manufactured_phones()
                 input("\nPress Enter to continue...")
 
-            elif choice == '7':
+            elif choice == '6':
                 filename = input("Enter filename (default: savegame.json): ").strip()
                 if not filename:
                     filename = "savegame.json"
                 self.save_game(filename)
                 input("\nPress Enter to continue...")
 
-            elif choice == '8':
+            elif choice == '7':
                 if len(self.players) > 1:
                     self.next_player()
                     print(f"\n>>> Switching to {self.get_current_player().name} <<<")
@@ -752,7 +750,7 @@ class Game:
                     print("Single player mode - no other players")
                     input("\nPress Enter to continue...")
 
-            elif choice == '9':
+            elif choice == '8':
                 confirm = input("\nQuit game? (y/n): ").strip().lower()
                 if confirm == 'y':
                     return 'quit'
