@@ -44,18 +44,41 @@ RND_CONFIG = {
     10: (300000, 10),
 }
 
-# Part costs per tier (for ordering)
-PART_COST_PER_TIER = {
-    1: 10,
-    2: 25,
-    3: 50,
-    4: 100,
-    5: 200,
-    6: 400,
-    7: 700,
-    8: 1200,
-    9: 2000,
-    10: 3500,
+# Part costs per tier (differentiated by component type)
+# Hierarchy: SoC > Screen > RAM > Storage > Battery > Camera > Casing
+PART_COSTS = {
+    'soc': {
+        1: 15, 2: 40, 3: 80, 4: 160, 5: 320,
+        6: 600, 7: 1000, 8: 1600, 9: 2500, 10: 4000
+    },
+    'screen': {
+        1: 12, 2: 30, 3: 65, 4: 130, 5: 260,
+        6: 480, 7: 800, 8: 1300, 9: 2000, 10: 3200
+    },
+    'ram': {
+        1: 8, 2: 20, 3: 45, 4: 90, 5: 180,
+        6: 350, 7: 600, 8: 1000, 9: 1600, 10: 2600
+    },
+    'storage': {
+        1: 7, 2: 18, 3: 40, 4: 80, 5: 160,
+        6: 300, 7: 520, 8: 900, 9: 1450, 10: 2400
+    },
+    'battery': {
+        1: 5, 2: 15, 3: 35, 4: 70, 5: 140,
+        6: 260, 7: 450, 8: 780, 9: 1250, 10: 2100
+    },
+    'camera': {
+        1: 4, 2: 12, 3: 28, 4: 60, 5: 120,
+        6: 230, 7: 400, 8: 700, 9: 1100, 10: 1900
+    },
+    'casing': {
+        1: 3, 2: 8, 3: 20, 4: 45, 5: 90,
+        6: 180, 7: 320, 8: 560, 9: 900, 10: 1500
+    },
+    'fingerprint': {
+        1: 3, 2: 8, 3: 18, 4: 40, 5: 80,
+        6: 150, 7: 270, 8: 470, 9: 750, 10: 1250
+    },
 }
 
 # Customer tier distribution (fixed percentages)
@@ -247,15 +270,15 @@ class PhoneBlueprint:
     def get_production_cost(self):
         """Calculate the cost to manufacture one unit"""
         cost = 0
-        cost += PART_COST_PER_TIER[self.ram_tier]
-        cost += PART_COST_PER_TIER[self.soc_tier]
-        cost += PART_COST_PER_TIER[self.screen_tier]
-        cost += PART_COST_PER_TIER[self.battery_tier]
-        cost += PART_COST_PER_TIER[self.camera_tier]
-        cost += PART_COST_PER_TIER[self.casing_tier]
-        cost += PART_COST_PER_TIER[self.storage_tier]
+        cost += PART_COSTS['ram'][self.ram_tier]
+        cost += PART_COSTS['soc'][self.soc_tier]
+        cost += PART_COSTS['screen'][self.screen_tier]
+        cost += PART_COSTS['battery'][self.battery_tier]
+        cost += PART_COSTS['camera'][self.camera_tier]
+        cost += PART_COSTS['casing'][self.casing_tier]
+        cost += PART_COSTS['storage'][self.storage_tier]
         if self.fingerprint_tier > 0:
-            cost += PART_COST_PER_TIER[self.fingerprint_tier]
+            cost += PART_COSTS['fingerprint'][self.fingerprint_tier]
         return cost
 
     def calculate_score(self):
@@ -1168,9 +1191,9 @@ class Game:
         # Calculate suggested price
         suggested_cost = 0
         for part in CORE_PARTS:
-            suggested_cost += PART_COST_PER_TIER[parts[part]]
+            suggested_cost += PART_COSTS[part][parts[part]]
         if 'fingerprint' in parts:
-            suggested_cost += PART_COST_PER_TIER[parts['fingerprint']]
+            suggested_cost += PART_COSTS['fingerprint'][parts['fingerprint']]
 
         print(f"\n--- Cost Analysis ---")
         print(f"Production cost per unit: ${suggested_cost}")
