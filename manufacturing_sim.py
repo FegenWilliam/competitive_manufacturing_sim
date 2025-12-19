@@ -390,6 +390,15 @@ class Player:
         self.sold_devices: Dict[str, int] = {}  # Total devices sold (for calculating repair returns)
         self.pending_repairs: Dict[str, int] = {}  # Devices awaiting repair decision
 
+        # Brand reputation system (0-100, starts at 50)
+        self.brand_reputation: float = 50.0
+
+        # Price history tracking: blueprint_name -> [(month, price), ...]
+        self.price_history: Dict[str, List[tuple]] = {}
+
+        # Track rejected repairs this month (for brand penalty calculation)
+        self.rejected_repairs_this_month: int = 0
+
     def to_dict(self):
         """Convert player to dictionary for JSON serialization"""
         return {
@@ -404,6 +413,9 @@ class Player:
             'manufacturing_used_this_month': self.manufacturing_used_this_month,
             'sold_devices': self.sold_devices,
             'pending_repairs': self.pending_repairs,
+            'brand_reputation': self.brand_reputation,
+            'price_history': self.price_history,
+            'rejected_repairs_this_month': self.rejected_repairs_this_month,
         }
 
     @staticmethod
@@ -420,6 +432,9 @@ class Player:
         player.manufacturing_used_this_month = data.get('manufacturing_used_this_month', 0)
         player.sold_devices = data.get('sold_devices', {})
         player.pending_repairs = data.get('pending_repairs', {})
+        player.brand_reputation = data.get('brand_reputation', 50.0)
+        player.price_history = data.get('price_history', {})
+        player.rejected_repairs_this_month = data.get('rejected_repairs_this_month', 0)
         return player
 
     def display_status(self):
@@ -427,6 +442,7 @@ class Player:
         print(f"\n{'='*60}")
         print(f"Player: {self.name}")
         print(f"Month: {self.current_month} | Money: ${self.money:,}")
+        print(f"Brand Reputation: {self.brand_reputation:.1f}/100")
         print(f"{'='*60}")
 
     def display_unlocked_tiers(self):
@@ -666,6 +682,10 @@ class Player:
         )
 
         self.blueprints.append(blueprint)
+
+        # Track the initial price for brand reputation monitoring
+        self.track_blueprint_price(name, sell_price)
+
         print(f"\n✓ Created blueprint: {name}")
         blueprint.display(global_tech_level)
         return True
@@ -859,6 +879,119 @@ class Player:
         print(f"  Remaining balance: ${self.money:,}")
         return True
 
+    def reject_repairs(self, blueprint_name: str, quantity: int) -> bool:
+        """
+        Reject repairs for a specified quantity of devices.
+        This removes the devices from pending repairs without paying,
+        but incurs a brand reputation penalty.
+        Returns True if successful, False otherwise.
+        """
+        # Check if there are pending repairs for this blueprint
+        if blueprint_name not in self.pending_repairs or self.pending_repairs[blueprint_name] <= 0:
+            print(f"❌ No pending repairs for {blueprint_name}")
+            return False
+
+        # Check quantity
+        if quantity <= 0:
+            print(f"❌ Invalid quantity: {quantity}")
+            return False
+
+        if quantity > self.pending_repairs[blueprint_name]:
+            print(f"❌ Only {self.pending_repairs[blueprint_name]} units pending repair")
+            return False
+
+        # Reject the repairs
+        self.pending_repairs[blueprint_name] -= quantity
+
+        # Remove from pending if none left
+        if self.pending_repairs[blueprint_name] <= 0:
+            del self.pending_repairs[blueprint_name]
+
+        # Track rejected repairs for brand penalty (applied at month end)
+        self.rejected_repairs_this_month += quantity
+
+        print(f"\n⚠️  Rejected repairs for {quantity}x {blueprint_name}")
+        print(f"  Brand reputation will be affected (-1 per device, max -10 per month)")
+        print(f"  Total rejected this month: {self.rejected_repairs_this_month}")
+        return True
+
+    def calculate_brand_reputation_changes(self, global_tech_level: int):
+        """
+        Calculate and apply monthly brand reputation changes based on:
+        1. Build quality - cheap casing on flagship phones (-1 per month)
+        2. Price reliability - price swings over 3 months (-2 per month)
+        3. Rejected repairs (-1 per device, max -10 per month)
+        """
+        reputation_changes = []
+        total_change = 0
+
+        # 1. Check build quality - penalize cheap casing on flagship phones
+        for blueprint in self.blueprints:
+            tier_name = blueprint.get_tier_name(global_tech_level)
+
+            # If it's a flagship/high-end phone with low-tier casing, penalize
+            if tier_name in ["Flagship", "High End"]:
+                # Entry-level casing is T1-T2
+                if blueprint.casing_tier <= 2:
+                    reputation_changes.append(f"  Cheap casing on {tier_name} phone '{blueprint.name}': -1")
+                    total_change -= 1
+
+        # 2. Check price reliability - look for price swings over last 3 months
+        for blueprint_name, price_records in self.price_history.items():
+            # Only check if we have at least 3 months of data
+            if len(price_records) >= 3:
+                # Get the last 3 prices
+                recent_prices = [price for _, price in price_records[-3:]]
+
+                # Calculate if there's a significant swing (more than 20% change between any consecutive months)
+                has_swing = False
+                for i in range(len(recent_prices) - 1):
+                    price1, price2 = recent_prices[i], recent_prices[i + 1]
+                    if price1 > 0:  # Avoid division by zero
+                        percent_change = abs(price2 - price1) / price1 * 100
+                        if percent_change > 20:
+                            has_swing = True
+                            break
+
+                if has_swing:
+                    reputation_changes.append(f"  Unreliable pricing for '{blueprint_name}': -2")
+                    total_change -= 2
+
+        # 3. Apply rejected repairs penalty (capped at -10 per month)
+        if self.rejected_repairs_this_month > 0:
+            penalty = min(self.rejected_repairs_this_month, 10)
+            reputation_changes.append(f"  Rejected {self.rejected_repairs_this_month} repairs: -{penalty}")
+            total_change -= penalty
+
+        # Apply the changes
+        old_reputation = self.brand_reputation
+        self.brand_reputation = max(0, min(100, self.brand_reputation + total_change))
+
+        # Reset monthly counter
+        self.rejected_repairs_this_month = 0
+
+        # Display changes if any
+        if reputation_changes:
+            print(f"\n📊 Brand Reputation Changes for {self.name}:")
+            for change in reputation_changes:
+                print(change)
+            print(f"  Total change: {total_change:+.1f}")
+            print(f"  Brand reputation: {old_reputation:.1f} → {self.brand_reputation:.1f}")
+
+        return total_change
+
+    def track_blueprint_price(self, blueprint_name: str, price: int):
+        """Track price history for a blueprint"""
+        if blueprint_name not in self.price_history:
+            self.price_history[blueprint_name] = []
+
+        # Add current month and price
+        self.price_history[blueprint_name].append((self.current_month, price))
+
+        # Keep only last 3 months of history
+        if len(self.price_history[blueprint_name]) > 3:
+            self.price_history[blueprint_name] = self.price_history[blueprint_name][-3:]
+
 
 class CustomerMarket:
     """Manages the customer market and purchasing behavior"""
@@ -992,6 +1125,14 @@ class CustomerMarket:
 
             for player, blueprint in matching_phones:
                 score = customer.evaluate_phone(blueprint)
+
+                # Apply brand reputation bonus
+                # At 100 brand: 20% boost (multiply by 1.2)
+                # At 50 brand: 10% boost (multiply by 1.1)
+                # At 0 brand: no boost (multiply by 1.0)
+                brand_multiplier = 1.0 + (player.brand_reputation / 100.0 * 0.2)
+                score *= brand_multiplier
+
                 if score > best_score:
                     best_score = score
                     best_phone = blueprint
@@ -1172,6 +1313,17 @@ class Game:
 
         if not any_repairs:
             print("  No devices returned for repair this month.")
+
+        # 4.6. Calculate brand reputation changes for each player
+        print(f"\n--- Brand Reputation Update ---")
+        any_brand_changes = False
+        for player in self.players:
+            change = player.calculate_brand_reputation_changes(self.global_tech_level)
+            if change != 0:
+                any_brand_changes = True
+
+        if not any_brand_changes:
+            print("  No brand reputation changes this month.")
 
         # 5. Check if it's time for tech advancement
         if self.months_until_tech_advance <= 0:
@@ -1493,14 +1645,8 @@ class Game:
             print("\nActions:")
             print("1. Repair specific device model")
             print("2. Repair all devices")
-            # TODO: Add "Reject Repair" option
-            # This would allow players to reject repairs for specific models
-            # Should apply a brand reputation penalty (not yet implemented - needs brand system)
-            # When brand system is added, rejecting repairs should:
-            #   - Remove devices from pending_repairs without paying
-            #   - Decrease brand reputation/loyalty score
-            #   - Potentially affect future sales in that market tier
-            print("3. Back to main menu")
+            print("3. Reject repair (⚠️  affects brand reputation)")
+            print("4. Back to main menu")
 
             choice = input("\nChoice: ").strip()
 
@@ -1546,6 +1692,38 @@ class Game:
                     print("❌ Cancelled")
 
             elif choice == '3':
+                # Reject repairs
+                print("\n⚠️  WARNING: Rejecting repairs will damage your brand reputation!")
+                print("Select device model to reject repairs for:")
+                blueprint_list = list(player.pending_repairs.keys())
+                for i, blueprint_name in enumerate(blueprint_list, 1):
+                    quantity = player.pending_repairs[blueprint_name]
+                    print(f"{i}. {blueprint_name}: {quantity} units")
+
+                try:
+                    model_choice = int(input("\nModel number (0 to cancel): ")) - 1
+                    if model_choice == -1:
+                        print("❌ Cancelled")
+                    elif 0 <= model_choice < len(blueprint_list):
+                        blueprint_name = blueprint_list[model_choice]
+                        max_quantity = player.pending_repairs[blueprint_name]
+                        print(f"\nPending repairs for {blueprint_name}: {max_quantity} units")
+                        quantity = int(input(f"How many to reject (1-{max_quantity}): "))
+
+                        if 1 <= quantity <= max_quantity:
+                            confirm = input(f"\n⚠️  Are you sure you want to reject {quantity} repairs? This will hurt your brand! (y/n): ").strip().lower()
+                            if confirm == 'y':
+                                player.reject_repairs(blueprint_name, quantity)
+                            else:
+                                print("❌ Cancelled")
+                        else:
+                            print(f"❌ Invalid quantity. Must be between 1 and {max_quantity}")
+                    else:
+                        print("❌ Invalid selection")
+                except ValueError:
+                    print("❌ Invalid input")
+
+            elif choice == '4':
                 break
 
     def main_menu(self):
