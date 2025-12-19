@@ -441,8 +441,27 @@ class Player:
         remaining_capacity = MANUFACTURING_LIMIT_PER_MONTH - self.manufacturing_used_this_month
         print(f"\nManufacturing capacity remaining this month: {remaining_capacity}/{MANUFACTURING_LIMIT_PER_MONTH}")
 
+    def complete_manufacturing(self):
+        """Complete manufacturing items that are ready (separate from advancing month)"""
+        completed_manufacturing = []
+        new_queue = []
+
+        for blueprint_name, quantity, months_remaining in self.manufacturing_queue:
+            if months_remaining <= 0:
+                # Manufacturing is complete
+                completed_manufacturing.append((blueprint_name, quantity))
+                if blueprint_name not in self.manufactured_phones:
+                    self.manufactured_phones[blueprint_name] = 0
+                self.manufactured_phones[blueprint_name] += quantity
+            else:
+                # Still in progress
+                new_queue.append((blueprint_name, quantity, months_remaining))
+
+        self.manufacturing_queue = new_queue
+        return completed_manufacturing
+
     def advance_month(self):
-        """Advance to next month and update R&D projects and manufacturing"""
+        """Advance to next month and update R&D projects (manufacturing is handled separately)"""
         self.current_month += 1
 
         # Reset manufacturing limit for new month
@@ -465,27 +484,11 @@ class Player:
             for proj in completed_projects:
                 print(f"  - {proj.part_type.capitalize()} T{proj.target_tier} unlocked!")
 
-        # Update manufacturing queue
-        completed_manufacturing = []
-        for i, (blueprint_name, quantity, months_remaining) in enumerate(self.manufacturing_queue):
-            months_remaining -= 1
-            if months_remaining <= 0:
-                completed_manufacturing.append((blueprint_name, quantity))
-                if blueprint_name not in self.manufactured_phones:
-                    self.manufactured_phones[blueprint_name] = 0
-                self.manufactured_phones[blueprint_name] += quantity
-            else:
-                self.manufacturing_queue[i] = (blueprint_name, quantity, months_remaining)
-
-        # Remove completed manufacturing
-        self.manufacturing_queue = [(name, qty, months) for (name, qty, months) in self.manufacturing_queue if months > 0]
-
-        if completed_manufacturing:
-            print(f"\n📦 Manufacturing Completed:")
-            for name, qty in completed_manufacturing:
-                print(f"  - {qty}x {name} ready to sell!")
-
-        print(f"\n✓ Advanced to Month {self.current_month}")
+        # Decrement manufacturing queue timers (actual completion happens in complete_manufacturing)
+        new_queue = []
+        for blueprint_name, quantity, months_remaining in self.manufacturing_queue:
+            new_queue.append((blueprint_name, quantity, months_remaining - 1))
+        self.manufacturing_queue = new_queue
 
     def start_rnd(self, part_type: str, target_tier: int, min_tier: int = 1, max_tier: int = MAX_TIER) -> bool:
         """Start a new R&D project"""
@@ -627,13 +630,24 @@ class Player:
         # Deduct money and add to manufacturing queue
         self.money -= total_cost
         self.manufacturing_used_this_month += quantity
-        self.manufacturing_queue.append((blueprint_name, quantity, 1))  # Takes 1 month
 
-        print(f"\n✓ Started manufacturing {quantity}x {blueprint_name}")
-        print(f"  Parts cost: ${total_cost:,}")
-        print(f"  Will complete in 1 month (Month {self.current_month + 1})")
-        print(f"  Remaining balance: ${self.money:,}")
-        print(f"  Manufacturing capacity used: {self.manufacturing_used_this_month}/{MANUFACTURING_LIMIT_PER_MONTH}")
+        # First month: instant manufacturing (0 months), after that: 1 month
+        if self.current_month == 1:
+            months_to_complete = 0
+            print(f"\n✓ Started manufacturing {quantity}x {blueprint_name}")
+            print(f"  Parts cost: ${total_cost:,}")
+            print(f"  Will complete instantly (ready to sell this month)")
+            print(f"  Remaining balance: ${self.money:,}")
+            print(f"  Manufacturing capacity used: {self.manufacturing_used_this_month}/{MANUFACTURING_LIMIT_PER_MONTH}")
+        else:
+            months_to_complete = 1
+            print(f"\n✓ Started manufacturing {quantity}x {blueprint_name}")
+            print(f"  Parts cost: ${total_cost:,}")
+            print(f"  Will complete at end of month (ready to sell next month)")
+            print(f"  Remaining balance: ${self.money:,}")
+            print(f"  Manufacturing capacity used: {self.manufacturing_used_this_month}/{MANUFACTURING_LIMIT_PER_MONTH}")
+
+        self.manufacturing_queue.append((blueprint_name, quantity, months_to_complete))
         return True
 
 
@@ -827,6 +841,7 @@ class Game:
         self.global_tech_level = 1  # Determines which 5 tiers are available (1 = tiers 1-5, 2 = tiers 2-6, etc.)
         self.months_until_tech_advance = 36  # Tech advances every 3 years (36 months)
         self.customer_market = CustomerMarket()  # Customer market
+        self.players_ready_for_next_month = set()  # Track which players have advanced this turn
 
     def to_dict(self):
         """Convert game state to dictionary"""
@@ -837,6 +852,7 @@ class Game:
             'global_tech_level': self.global_tech_level,
             'months_until_tech_advance': self.months_until_tech_advance,
             'customer_market': self.customer_market.to_dict(),
+            'players_ready_for_next_month': list(self.players_ready_for_next_month),
         }
 
     @staticmethod
@@ -852,6 +868,7 @@ class Game:
             game.customer_market = CustomerMarket.from_dict(data['customer_market'])
         else:
             game.customer_market = CustomerMarket()
+        game.players_ready_for_next_month = set(data.get('players_ready_for_next_month', []))
         return game
 
     def get_available_tier_range(self):
@@ -881,25 +898,51 @@ class Game:
                 if player.unlocked_tiers[part] < new_max:
                     player.unlocked_tiers[part] = new_max
 
-    def advance_game_month(self, player: Player):
-        """Advance the game month and handle global tech advancement"""
-        # Advance player's month
-        player.advance_month()
+    def advance_game_month(self):
+        """Advance the game month - happens when all players are ready"""
+        print(f"\n{'='*60}")
+        print(f"END OF MONTH {self.global_month} REPORT")
+        print(f"{'='*60}")
 
-        # Advance global month
+        # 1. Simulate customer purchases for current month (BEFORE manufacturing completes)
+        if self.customer_market.customers:
+            self.customer_market.simulate_purchases(self.players, self.global_tech_level)
+        else:
+            print("\n❌ No customer data yet for this month.")
+
+        # 2. Complete manufacturing for all players (AFTER sales)
+        print(f"\n--- Manufacturing Completion ---")
+        any_manufacturing = False
+        for player in self.players:
+            completed = player.complete_manufacturing()
+            if completed:
+                any_manufacturing = True
+                print(f"\n📦 {player.name} - Manufacturing Completed:")
+                for name, qty in completed:
+                    print(f"  - {qty}x {name} ready to sell!")
+
+        if not any_manufacturing:
+            print("  No manufacturing completed this month.")
+
+        # 3. Advance global month
         self.global_month += 1
         self.months_until_tech_advance -= 1
 
-        # Check if it's time for tech advancement
+        print(f"\n{'='*60}")
+        print(f"✓ Advanced to Month {self.global_month}")
+        print(f"{'='*60}")
+
+        # 4. Advance each player's month (R&D progress, reset limits)
+        for player in self.players:
+            player.advance_month()
+
+        # 5. Check if it's time for tech advancement
         if self.months_until_tech_advance <= 0:
             self.advance_global_tech()
             self.months_until_tech_advance = 36  # Reset counter
 
-        # Generate customers for the new month
+        # 6. Generate customers for the new month
         self.customer_market.generate_customers_for_month(self.global_month)
-
-        # Simulate customer purchases
-        self.customer_market.simulate_purchases(self.players, self.global_tech_level)
 
         # Display countdown to next tech advancement
         years_remaining = self.months_until_tech_advance // 12
@@ -912,6 +955,9 @@ class Game:
             print(f"⏳ Next tech advancement in {years_remaining} year(s) and {months_remaining} month(s)")
         else:
             print(f"⏳ Next tech advancement in {months_remaining} month(s)")
+
+        # 7. Reset players ready tracking
+        self.players_ready_for_next_month.clear()
 
     def save_game(self, filename: str = "savegame.json"):
         """Save game to JSON file"""
@@ -956,6 +1002,9 @@ class Game:
             if not name:
                 name = f"Player {i+1}"
             self.players.append(Player(name))
+
+        # Generate initial customer market for month 1
+        self.customer_market.generate_customers_for_month(self.global_month)
 
         print(f"\n✓ Game setup complete with {num_players} player(s)")
 
@@ -1224,8 +1273,24 @@ class Game:
             choice = input("\nChoice: ").strip()
 
             if choice == '1':
-                self.advance_game_month(player)
-                input("\nPress Enter to continue...")
+                # Mark current player as ready for next month
+                self.players_ready_for_next_month.add(player.name)
+                print(f"\n✓ {player.name} is ready to advance to next month")
+
+                # Check if all players are ready
+                if len(self.players_ready_for_next_month) == len(self.players):
+                    # All players ready - actually advance the month
+                    self.advance_game_month()
+                    input("\nPress Enter to continue...")
+                else:
+                    # Not all players ready - switch to next player
+                    waiting_players = [p.name for p in self.players if p.name not in self.players_ready_for_next_month]
+                    print(f"\nWaiting for: {', '.join(waiting_players)}")
+                    print("\nSwitching to next player...")
+                    self.next_player()
+                    print(f"\n>>> Now playing as {self.get_current_player().name} <<<")
+                    input("Press Enter to continue...")
+                    return  # Return to show next player's menu
 
             elif choice == '2':
                 self.menu_create_phone(player)
