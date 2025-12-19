@@ -6,6 +6,7 @@ A game where up to 4 players compete to be the manufacturing leader of phones.
 
 import json
 import os
+import random
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 
@@ -56,6 +57,154 @@ PART_COST_PER_TIER = {
     9: 2000,
     10: 3500,
 }
+
+# Customer tier distribution (fixed percentages)
+CUSTOMER_TIER_DISTRIBUTION = {
+    'Entry Level': 0.15,  # 15%
+    'Budget': 0.30,       # 30%
+    'Midrange': 0.40,     # 40%
+    'High End': 0.10,     # 10%
+    'Flagship': 0.05,     # 5%
+}
+
+# Initial customer count and monthly growth
+INITIAL_CUSTOMER_COUNT = 1000
+CUSTOMER_GROWTH_PER_MONTH = 200
+
+# Customer types and their preferences (weights for each component)
+CUSTOMER_TYPES = {
+    'Gamer': {
+        'soc': 10,      # Highest priority
+        'ram': 8,
+        'battery': 6,
+        'screen': 4,
+        'storage': 3,
+        'camera': 2,
+        'casing': 1,
+    },
+    'Camera Enthusiast': {
+        'camera': 10,   # Highest priority
+        'screen': 5,
+        'storage': 4,
+        'soc': 3,
+        'battery': 3,
+        'ram': 2,
+        'casing': 2,
+    },
+    'Social Media User': {
+        'camera': 8,
+        'screen': 7,
+        'battery': 7,
+        'storage': 4,
+        'soc': 3,
+        'ram': 2,
+        'casing': 3,
+    },
+    'Storage Seeker': {
+        'storage': 10,  # Highest priority
+        'soc': 4,
+        'ram': 4,
+        'battery': 4,
+        'camera': 3,
+        'screen': 3,
+        'casing': 2,
+    },
+    'Design Lover': {
+        'casing': 10,   # Highest priority
+        'screen': 7,
+        'camera': 5,
+        'battery': 3,
+        'soc': 3,
+        'ram': 2,
+        'storage': 2,
+    },
+    'Value Hunter': {
+        # Balanced, but cares about price-to-performance
+        'soc': 6,
+        'ram': 5,
+        'battery': 5,
+        'storage': 5,
+        'camera': 4,
+        'screen': 4,
+        'casing': 3,
+    },
+    'Battery Enthusiast': {
+        'battery': 10,  # Highest priority
+        'soc': 4,
+        'screen': 4,
+        'ram': 3,
+        'storage': 3,
+        'camera': 3,
+        'casing': 2,
+    },
+    'Performance Seeker': {
+        'soc': 9,
+        'ram': 9,
+        'storage': 5,
+        'battery': 4,
+        'screen': 3,
+        'camera': 2,
+        'casing': 2,
+    },
+    'Display Enthusiast': {
+        'screen': 10,   # Highest priority
+        'camera': 5,
+        'casing': 5,
+        'battery': 4,
+        'soc': 3,
+        'ram': 3,
+        'storage': 2,
+    },
+    'All-Rounder': {
+        # Balanced preferences
+        'soc': 5,
+        'ram': 5,
+        'battery': 5,
+        'screen': 5,
+        'camera': 5,
+        'storage': 5,
+        'casing': 5,
+    },
+}
+
+
+@dataclass
+class Customer:
+    """Represents a customer in the market"""
+    tier: str  # Entry Level, Budget, Midrange, High End, Flagship
+    customer_type: str  # Gamer, Camera Enthusiast, etc.
+
+    def to_dict(self):
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(data):
+        return Customer(**data)
+
+    def evaluate_phone(self, phone: 'PhoneBlueprint') -> float:
+        """
+        Evaluate a phone based on customer preferences.
+        Returns a satisfaction score.
+        """
+        preferences = CUSTOMER_TYPES[self.customer_type]
+        score = 0
+
+        # Evaluate each component based on preferences
+        score += phone.soc_tier * preferences['soc']
+        score += phone.ram_tier * preferences['ram']
+        score += phone.battery_tier * preferences['battery']
+        score += phone.screen_tier * preferences['screen']
+        score += phone.camera_tier * preferences['camera']
+        score += phone.storage_tier * preferences['storage']
+        score += phone.casing_tier * preferences['casing']
+
+        # Value hunters also consider price (lower price = better for them)
+        if self.customer_type == 'Value Hunter':
+            # Normalize price impact (assuming max reasonable price is 5000)
+            price_penalty = phone.sell_price / 5000 * 20
+            score -= price_penalty
+
+        return score
 
 
 @dataclass
@@ -488,6 +637,186 @@ class Player:
         return True
 
 
+class CustomerMarket:
+    """Manages the customer market and purchasing behavior"""
+
+    def __init__(self):
+        self.customers: List[Customer] = []
+        self.current_month = 0
+        self.sales_history: Dict[int, Dict[str, int]] = {}  # month -> {player_name: sales_count}
+
+    def to_dict(self):
+        """Convert market to dictionary"""
+        return {
+            'customers': [c.to_dict() for c in self.customers],
+            'current_month': self.current_month,
+            'sales_history': self.sales_history,
+        }
+
+    @staticmethod
+    def from_dict(data):
+        """Load market from dictionary"""
+        market = CustomerMarket()
+        market.customers = [Customer.from_dict(c) for c in data.get('customers', [])]
+        market.current_month = data.get('current_month', 0)
+        market.sales_history = data.get('sales_history', {})
+        return market
+
+    def generate_customers_for_month(self, month: int):
+        """Generate customers for a given month with fixed tier distribution"""
+        if month == 1:
+            total_customers = INITIAL_CUSTOMER_COUNT
+        else:
+            total_customers = INITIAL_CUSTOMER_COUNT + (month - 1) * CUSTOMER_GROWTH_PER_MONTH
+
+        # Clear existing customers
+        self.customers = []
+
+        # Generate customers based on fixed tier distribution
+        for tier_name, percentage in CUSTOMER_TIER_DISTRIBUTION.items():
+            count = int(total_customers * percentage)
+
+            for _ in range(count):
+                # Randomly assign customer type
+                customer_type = random.choice(list(CUSTOMER_TYPES.keys()))
+                customer = Customer(tier=tier_name, customer_type=customer_type)
+                self.customers.append(customer)
+
+        self.current_month = month
+
+        print(f"\n📊 Customer Market for Month {month}:")
+        print(f"  Total customers: {len(self.customers)}")
+        for tier_name, percentage in CUSTOMER_TIER_DISTRIBUTION.items():
+            count = int(total_customers * percentage)
+            print(f"  - {tier_name}: {count} ({int(percentage*100)}%)")
+
+    def display_customer_breakdown(self):
+        """Display breakdown of customers by tier and type"""
+        print(f"\n📊 Customer Market Analysis (Month {self.current_month}):")
+        print(f"  Total customers: {len(self.customers)}")
+
+        # Count by tier
+        tier_counts = {}
+        for customer in self.customers:
+            tier_counts[customer.tier] = tier_counts.get(customer.tier, 0) + 1
+
+        print("\n  By Tier:")
+        for tier in ['Entry Level', 'Budget', 'Midrange', 'High End', 'Flagship']:
+            count = tier_counts.get(tier, 0)
+            percentage = (count / len(self.customers) * 100) if self.customers else 0
+            print(f"    {tier}: {count} ({percentage:.1f}%)")
+
+        # Count by type
+        type_counts = {}
+        for customer in self.customers:
+            type_counts[customer.customer_type] = type_counts.get(customer.customer_type, 0) + 1
+
+        print("\n  By Type:")
+        for customer_type in sorted(CUSTOMER_TYPES.keys()):
+            count = type_counts.get(customer_type, 0)
+            percentage = (count / len(self.customers) * 100) if self.customers else 0
+            print(f"    {customer_type}: {count} ({percentage:.1f}%)")
+
+    def simulate_purchases(self, players: List[Player], global_tech_level: int):
+        """
+        Simulate customer purchases from available phones.
+        Each customer buys one phone per month based on their tier and preferences.
+        """
+        print(f"\n🛒 Simulating customer purchases for Month {self.current_month}...")
+
+        # Collect all available phones from all players
+        available_phones = []  # List of (player, blueprint, quantity)
+        for player in players:
+            for phone_name, quantity in player.manufactured_phones.items():
+                if quantity > 0:
+                    # Find the blueprint
+                    blueprint = None
+                    for bp in player.blueprints:
+                        if bp.name == phone_name:
+                            blueprint = bp
+                            break
+                    if blueprint:
+                        available_phones.append((player, blueprint, quantity))
+
+        if not available_phones:
+            print("  ❌ No phones available for purchase!")
+            return
+
+        # Track sales for this month
+        sales_by_player = {}
+        for player in players:
+            sales_by_player[player.name] = 0
+
+        # Track sales by phone
+        sales_by_phone = {}  # (player_name, phone_name) -> count
+
+        # Each customer tries to buy a phone
+        for customer in self.customers:
+            # Find phones matching customer's tier
+            matching_phones = []
+            for player, blueprint, quantity in available_phones:
+                phone_tier = blueprint.get_tier_name(global_tech_level)
+                if phone_tier == customer.tier:
+                    matching_phones.append((player, blueprint))
+
+            if not matching_phones:
+                continue  # No phones available in this tier
+
+            # Evaluate each phone based on customer preferences
+            best_phone = None
+            best_score = -float('inf')
+            best_player = None
+
+            for player, blueprint in matching_phones:
+                score = customer.evaluate_phone(blueprint)
+                if score > best_score:
+                    best_score = score
+                    best_phone = blueprint
+                    best_player = player
+
+            # Purchase the best phone
+            if best_phone and best_player:
+                # Check if still available
+                if best_player.manufactured_phones.get(best_phone.name, 0) > 0:
+                    # Complete the purchase
+                    best_player.manufactured_phones[best_phone.name] -= 1
+                    best_player.money += best_phone.sell_price
+
+                    # Track sales
+                    sales_by_player[best_player.name] += 1
+                    key = (best_player.name, best_phone.name)
+                    sales_by_phone[key] = sales_by_phone.get(key, 0) + 1
+
+                    # Update available_phones quantity
+                    for i, (p, bp, qty) in enumerate(available_phones):
+                        if p == best_player and bp.name == best_phone.name:
+                            available_phones[i] = (p, bp, qty - 1)
+                            break
+
+        # Store sales history
+        self.sales_history[self.current_month] = sales_by_player
+
+        # Display results
+        print(f"\n💰 Sales Results for Month {self.current_month}:")
+        total_sales = 0
+        for player in players:
+            sales = sales_by_player[player.name]
+            total_sales += sales
+            revenue = sum(
+                sales_by_phone.get((player.name, bp.name), 0) * bp.sell_price
+                for bp in player.blueprints
+            )
+            print(f"  {player.name}: {sales} phones sold, ${revenue:,} revenue")
+
+        print(f"\n  Total market sales: {total_sales} / {len(self.customers)} customers ({total_sales/len(self.customers)*100:.1f}% market penetration)")
+
+        # Show detailed breakdown by phone
+        if sales_by_phone:
+            print(f"\n  Sales by phone model:")
+            for (player_name, phone_name), count in sorted(sales_by_phone.items(), key=lambda x: x[1], reverse=True):
+                print(f"    {player_name} - {phone_name}: {count} units")
+
+
 class Game:
     """Main game controller"""
 
@@ -497,6 +826,7 @@ class Game:
         self.global_month = 1  # Global game month
         self.global_tech_level = 1  # Determines which 5 tiers are available (1 = tiers 1-5, 2 = tiers 2-6, etc.)
         self.months_until_tech_advance = 36  # Tech advances every 3 years (36 months)
+        self.customer_market = CustomerMarket()  # Customer market
 
     def to_dict(self):
         """Convert game state to dictionary"""
@@ -506,6 +836,7 @@ class Game:
             'global_month': self.global_month,
             'global_tech_level': self.global_tech_level,
             'months_until_tech_advance': self.months_until_tech_advance,
+            'customer_market': self.customer_market.to_dict(),
         }
 
     @staticmethod
@@ -517,6 +848,10 @@ class Game:
         game.global_month = data.get('global_month', 1)
         game.global_tech_level = data.get('global_tech_level', 1)
         game.months_until_tech_advance = data.get('months_until_tech_advance', 36)
+        if 'customer_market' in data:
+            game.customer_market = CustomerMarket.from_dict(data['customer_market'])
+        else:
+            game.customer_market = CustomerMarket()
         return game
 
     def get_available_tier_range(self):
@@ -559,6 +894,12 @@ class Game:
         if self.months_until_tech_advance <= 0:
             self.advance_global_tech()
             self.months_until_tech_advance = 36  # Reset counter
+
+        # Generate customers for the new month
+        self.customer_market.generate_customers_for_month(self.global_month)
+
+        # Simulate customer purchases
+        self.customer_market.simulate_purchases(self.players, self.global_tech_level)
 
         # Display countdown to next tech advancement
         years_remaining = self.months_until_tech_advance // 12
@@ -875,9 +1216,10 @@ class Game:
             print("3. Manufacturing")
             print("4. R&D")
             print("5. View Status")
-            print("6. Save Game")
-            print("7. Next Player" if len(self.players) > 1 else "7. (Single Player)")
-            print("8. Quit")
+            print("6. View Customer Market")
+            print("7. Save Game")
+            print("8. Next Player" if len(self.players) > 1 else "8. (Single Player)")
+            print("9. Quit")
 
             choice = input("\nChoice: ").strip()
 
@@ -904,13 +1246,20 @@ class Game:
                 input("\nPress Enter to continue...")
 
             elif choice == '6':
+                if self.customer_market.customers:
+                    self.customer_market.display_customer_breakdown()
+                else:
+                    print("\n❌ No customer data yet. Advance to next month to generate customers.")
+                input("\nPress Enter to continue...")
+
+            elif choice == '7':
                 filename = input("Enter filename (default: savegame.json): ").strip()
                 if not filename:
                     filename = "savegame.json"
                 self.save_game(filename)
                 input("\nPress Enter to continue...")
 
-            elif choice == '7':
+            elif choice == '8':
                 if len(self.players) > 1:
                     self.next_player()
                     print(f"\n>>> Switching to {self.get_current_player().name} <<<")
@@ -920,7 +1269,7 @@ class Game:
                     print("Single player mode - no other players")
                     input("\nPress Enter to continue...")
 
-            elif choice == '8':
+            elif choice == '9':
                 confirm = input("\nQuit game? (y/n): ").strip().lower()
                 if confirm == 'y':
                     return 'quit'
