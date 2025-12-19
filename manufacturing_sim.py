@@ -18,6 +18,18 @@ MAX_TIER = 10
 STARTING_MONEY = 100000
 MANUFACTURING_LIMIT_PER_MONTH = 1000
 
+# Phone scoring weights (points per tier)
+SCORING_WEIGHTS = {
+    'soc': 5,
+    'battery': 4,
+    'screen': 3,
+    'ram': 3,
+    'camera': 2,
+    'storage': 2,
+    'casing': 1,
+    'fingerprint': 0  # Optional part, doesn't contribute to tier scoring
+}
+
 # R&D costs and time (tier: (cost, months))
 RND_CONFIG = {
     2: (5000, 2),
@@ -97,9 +109,52 @@ class PhoneBlueprint:
             cost += PART_COST_PER_TIER[self.fingerprint_tier]
         return cost
 
-    def display(self):
+    def calculate_score(self):
+        """Calculate the phone's quality score based on component tiers and weights"""
+        score = 0
+        score += self.soc_tier * SCORING_WEIGHTS['soc']
+        score += self.battery_tier * SCORING_WEIGHTS['battery']
+        score += self.screen_tier * SCORING_WEIGHTS['screen']
+        score += self.ram_tier * SCORING_WEIGHTS['ram']
+        score += self.camera_tier * SCORING_WEIGHTS['camera']
+        score += self.storage_tier * SCORING_WEIGHTS['storage']
+        score += self.casing_tier * SCORING_WEIGHTS['casing']
+        # Fingerprint doesn't contribute to tier scoring
+        return score
+
+    def get_tier_name(self, global_tech_level: int = 1):
+        """Determine the phone's market tier based on score and global tech level"""
+        score = self.calculate_score()
+
+        # Calculate threshold shift based on tech advancement
+        # Each tech level increase shifts thresholds by 20 points
+        threshold_shift = (global_tech_level - 1) * 20
+
+        # Define tier thresholds (base values + shift)
+        entry_level_max = 20 + threshold_shift
+        budget_max = 40 + threshold_shift
+        midrange_max = 60 + threshold_shift
+        high_end_max = 80 + threshold_shift
+        flagship_max = 100 + threshold_shift
+
+        if score <= entry_level_max:
+            return "Entry Level"
+        elif score <= budget_max:
+            return "Budget"
+        elif score <= midrange_max:
+            return "Midrange"
+        elif score <= high_end_max:
+            return "High End"
+        else:
+            return "Flagship"
+
+    def display(self, global_tech_level: int = 1):
         """Display blueprint details"""
+        score = self.calculate_score()
+        tier_name = self.get_tier_name(global_tech_level)
+
         print(f"\n  Blueprint: {self.name}")
+        print(f"  Market Tier: {tier_name} (Score: {score})")
         print(f"  RAM: T{self.ram_tier} | SoC: T{self.soc_tier} | Screen: T{self.screen_tier} | Storage: T{self.storage_tier}")
         print(f"  Battery: T{self.battery_tier} | Camera: T{self.camera_tier} | Casing: T{self.casing_tier}")
         if self.fingerprint_tier > 0:
@@ -200,7 +255,7 @@ class Player:
             print(f"  {i}. {proj.part_type.capitalize()} T{proj.target_tier} - "
                   f"{proj.months_remaining} months remaining")
 
-    def display_blueprints(self):
+    def display_blueprints(self, global_tech_level: int = 1):
         """Display all phone blueprints"""
         if not self.blueprints:
             print("\n--- No phone blueprints created ---")
@@ -209,7 +264,7 @@ class Player:
         print("\n--- Phone Blueprints ---")
         for i, bp in enumerate(self.blueprints, 1):
             print(f"\n{i}. ", end="")
-            bp.display()
+            bp.display(global_tech_level)
 
     def display_manufactured_phones(self):
         """Display manufactured phones inventory"""
@@ -332,7 +387,8 @@ class Player:
         return True
 
     def create_blueprint(self, name: str, parts: Dict[str, int], sell_price: int,
-                        min_tier: int = 1, max_tier: int = MAX_TIER) -> bool:
+                        min_tier: int = 1, max_tier: int = MAX_TIER,
+                        global_tech_level: int = 1) -> bool:
         """Create a new phone blueprint"""
         # Check if name already exists
         for bp in self.blueprints:
@@ -384,7 +440,7 @@ class Player:
 
         self.blueprints.append(blueprint)
         print(f"\n✓ Created blueprint: {name}")
-        blueprint.display()
+        blueprint.display(global_tech_level)
         return True
 
     def manufacture_phone(self, blueprint_name: str, quantity: int) -> bool:
@@ -679,6 +735,46 @@ class Game:
         else:
             print("\nFingerprint sensor not available (need to R&D first)")
 
+        # Calculate phone score and tier
+        score = 0
+        score += parts['soc'] * SCORING_WEIGHTS['soc']
+        score += parts['battery'] * SCORING_WEIGHTS['battery']
+        score += parts['screen'] * SCORING_WEIGHTS['screen']
+        score += parts['ram'] * SCORING_WEIGHTS['ram']
+        score += parts['camera'] * SCORING_WEIGHTS['camera']
+        score += parts['storage'] * SCORING_WEIGHTS['storage']
+        score += parts['casing'] * SCORING_WEIGHTS['casing']
+
+        # Determine tier
+        threshold_shift = (self.global_tech_level - 1) * 20
+        entry_level_max = 20 + threshold_shift
+        budget_max = 40 + threshold_shift
+        midrange_max = 60 + threshold_shift
+        high_end_max = 80 + threshold_shift
+
+        if score <= entry_level_max:
+            tier_name = "Entry Level"
+        elif score <= budget_max:
+            tier_name = "Budget"
+        elif score <= midrange_max:
+            tier_name = "Midrange"
+        elif score <= high_end_max:
+            tier_name = "High End"
+        else:
+            tier_name = "Flagship"
+
+        print(f"\n--- Phone Quality Analysis ---")
+        print(f"Quality Score: {score}")
+        print(f"Market Tier: {tier_name}")
+        print(f"Score breakdown:")
+        print(f"  SoC: {parts['soc']} × {SCORING_WEIGHTS['soc']} = {parts['soc'] * SCORING_WEIGHTS['soc']}")
+        print(f"  Battery: {parts['battery']} × {SCORING_WEIGHTS['battery']} = {parts['battery'] * SCORING_WEIGHTS['battery']}")
+        print(f"  Screen: {parts['screen']} × {SCORING_WEIGHTS['screen']} = {parts['screen'] * SCORING_WEIGHTS['screen']}")
+        print(f"  RAM: {parts['ram']} × {SCORING_WEIGHTS['ram']} = {parts['ram'] * SCORING_WEIGHTS['ram']}")
+        print(f"  Camera: {parts['camera']} × {SCORING_WEIGHTS['camera']} = {parts['camera'] * SCORING_WEIGHTS['camera']}")
+        print(f"  Storage: {parts['storage']} × {SCORING_WEIGHTS['storage']} = {parts['storage'] * SCORING_WEIGHTS['storage']}")
+        print(f"  Casing: {parts['casing']} × {SCORING_WEIGHTS['casing']} = {parts['casing'] * SCORING_WEIGHTS['casing']}")
+
         # Calculate suggested price
         suggested_cost = 0
         for part in CORE_PARTS:
@@ -686,7 +782,8 @@ class Game:
         if 'fingerprint' in parts:
             suggested_cost += PART_COST_PER_TIER[parts['fingerprint']]
 
-        print(f"\nProduction cost per unit: ${suggested_cost}")
+        print(f"\n--- Cost Analysis ---")
+        print(f"Production cost per unit: ${suggested_cost}")
         print(f"Suggested sell price (1.5x cost): ${int(suggested_cost * 1.5)}")
 
         while True:
@@ -699,7 +796,7 @@ class Game:
             except ValueError:
                 print("Invalid input")
 
-        player.create_blueprint(name, parts, sell_price, min_tier, max_tier)
+        player.create_blueprint(name, parts, sell_price, min_tier, max_tier, self.global_tech_level)
 
     def menu_manufacturing(self, player: Player):
         """Manufacturing menu"""
@@ -707,7 +804,7 @@ class Game:
             print("\n" + "="*60)
             print("MANUFACTURING")
             print("="*60)
-            player.display_blueprints()
+            player.display_blueprints(self.global_tech_level)
             player.display_manufacturing_queue()
             player.display_manufactured_phones()
 
@@ -731,7 +828,8 @@ class Game:
 
                 print("\nSelect blueprint:")
                 for i, bp in enumerate(player.blueprints, 1):
-                    print(f"{i}. {bp.name} (Cost: ${bp.get_production_cost()}/unit, Profit: ${bp.sell_price - bp.get_production_cost()}/unit)")
+                    tier_name = bp.get_tier_name(self.global_tech_level)
+                    print(f"{i}. {bp.name} [{tier_name}] (Cost: ${bp.get_production_cost()}/unit, Profit: ${bp.sell_price - bp.get_production_cost()}/unit)")
 
                 try:
                     bp_choice = int(input("\nBlueprint number: ")) - 1
@@ -800,7 +898,7 @@ class Game:
                 player.display_status()
                 player.display_unlocked_tiers()
                 player.display_ongoing_rnd()
-                player.display_blueprints()
+                player.display_blueprints(self.global_tech_level)
                 player.display_manufacturing_queue()
                 player.display_manufactured_phones()
                 input("\nPress Enter to continue...")
