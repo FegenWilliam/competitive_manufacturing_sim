@@ -1354,8 +1354,8 @@ class CustomerMarket:
         # Calculate total lifecycle
         total_lifecycle = base_time + tier_bonus + quality_bonus
 
-        # Minimum 6 months
-        return max(6, total_lifecycle)
+        # Enforce lifecycle constraints: minimum 6 months, maximum 30 months
+        return max(6, min(30, total_lifecycle))
 
     def display_customer_breakdown(self):
         """Display breakdown of customers by tier, type, and phone ownership"""
@@ -1405,6 +1405,65 @@ class CustomerMarket:
             for company, count in sorted(company_counts.items(), key=lambda x: x[1], reverse=True):
                 percentage = (count / people_with_phones * 100) if people_with_phones > 0 else 0
                 print(f"    {company}: {count} ({percentage:.1f}%)")
+
+    def consolidate_customer_groups(self):
+        """
+        Merge similar customer groups to prevent proliferation.
+        Groups are merged if they have identical:
+        - tier
+        - customer_type
+        - owned_phone_company
+        - owned_phone_blueprint
+        - purchase_month
+        """
+        if not self.customer_groups:
+            return
+
+        initial_count = len(self.customer_groups)
+
+        # Build a dictionary to group similar customers
+        merged_groups = {}
+
+        for group in self.customer_groups:
+            # Create a key from group characteristics
+            key = (
+                group.tier,
+                group.customer_type,
+                group.owned_phone_company,
+                group.owned_phone_blueprint,
+                group.purchase_month
+            )
+
+            if key in merged_groups:
+                # Merge into existing group
+                merged_groups[key].count += group.count
+                # Keep the most recent camera check month
+                if group.last_camera_check_month is not None:
+                    if merged_groups[key].last_camera_check_month is None:
+                        merged_groups[key].last_camera_check_month = group.last_camera_check_month
+                    else:
+                        merged_groups[key].last_camera_check_month = max(
+                            merged_groups[key].last_camera_check_month,
+                            group.last_camera_check_month
+                        )
+            else:
+                # Create new merged group entry
+                merged_groups[key] = CustomerGroup(
+                    tier=group.tier,
+                    customer_type=group.customer_type,
+                    count=group.count,
+                    owned_phone_company=group.owned_phone_company,
+                    owned_phone_blueprint=group.owned_phone_blueprint,
+                    purchase_month=group.purchase_month,
+                    last_camera_check_month=group.last_camera_check_month
+                )
+
+        # Replace customer groups with merged version
+        self.customer_groups = list(merged_groups.values())
+
+        final_count = len(self.customer_groups)
+        if initial_count != final_count:
+            print(f"  🔄 Consolidated customer groups: {initial_count} → {final_count} (merged {initial_count - final_count} groups)")
 
     def simulate_purchases(self, players: List[Player], global_tech_level: int):
         """
@@ -1629,6 +1688,9 @@ class CustomerMarket:
             print(f"\n  Sales by phone model:")
             for (player_name, phone_name), count in sorted(sales_by_phone.items(), key=lambda x: x[1], reverse=True):
                 print(f"    {player_name} - {phone_name}: {count} units")
+
+        # Consolidate customer groups to prevent proliferation
+        self.consolidate_customer_groups()
 
 
 class Game:
