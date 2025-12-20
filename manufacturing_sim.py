@@ -9,6 +9,14 @@ import os
 import random
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+from enum import Enum
+
+
+# Quality tier enum
+class Quality(Enum):
+    LOW = "Low"
+    NORMAL = "Normal"
+    HIGH = "High"
 
 
 # Game constants
@@ -259,6 +267,15 @@ class PhoneBlueprint:
     storage_tier: int
     fingerprint_tier: int  # 0 means no fingerprint
     sell_price: int
+    # Quality tiers for each component
+    ram_quality: str = "Normal"
+    soc_quality: str = "Normal"
+    screen_quality: str = "Normal"
+    battery_quality: str = "Normal"
+    camera_quality: str = "Normal"
+    casing_quality: str = "Normal"
+    storage_quality: str = "Normal"
+    fingerprint_quality: str = "Normal"
 
     def to_dict(self):
         return asdict(self)
@@ -268,18 +285,27 @@ class PhoneBlueprint:
         return PhoneBlueprint(**data)
 
     def get_production_cost(self):
-        """Calculate the cost to manufacture one unit"""
+        """Calculate the cost to manufacture one unit with quality multipliers"""
+        def apply_quality_multiplier(base_cost, quality):
+            """Apply quality multiplier: Low=0.5x, Normal=1.0x, High=1.5x"""
+            if quality == "Low":
+                return base_cost * 0.5
+            elif quality == "High":
+                return base_cost * 1.5
+            else:  # Normal
+                return base_cost
+
         cost = 0
-        cost += PART_COSTS['ram'][self.ram_tier]
-        cost += PART_COSTS['soc'][self.soc_tier]
-        cost += PART_COSTS['screen'][self.screen_tier]
-        cost += PART_COSTS['battery'][self.battery_tier]
-        cost += PART_COSTS['camera'][self.camera_tier]
-        cost += PART_COSTS['casing'][self.casing_tier]
-        cost += PART_COSTS['storage'][self.storage_tier]
+        cost += apply_quality_multiplier(PART_COSTS['ram'][self.ram_tier], self.ram_quality)
+        cost += apply_quality_multiplier(PART_COSTS['soc'][self.soc_tier], self.soc_quality)
+        cost += apply_quality_multiplier(PART_COSTS['screen'][self.screen_tier], self.screen_quality)
+        cost += apply_quality_multiplier(PART_COSTS['battery'][self.battery_tier], self.battery_quality)
+        cost += apply_quality_multiplier(PART_COSTS['camera'][self.camera_tier], self.camera_quality)
+        cost += apply_quality_multiplier(PART_COSTS['casing'][self.casing_tier], self.casing_quality)
+        cost += apply_quality_multiplier(PART_COSTS['storage'][self.storage_tier], self.storage_quality)
         if self.fingerprint_tier > 0:
-            cost += PART_COSTS['fingerprint'][self.fingerprint_tier]
-        return cost
+            cost += apply_quality_multiplier(PART_COSTS['fingerprint'][self.fingerprint_tier], self.fingerprint_quality)
+        return int(cost)
 
     def get_repair_return_rate(self):
         """
@@ -289,10 +315,18 @@ class PhoneBlueprint:
         - Each tier upgrade reduces by 0.25% per part
         - T6 (Flagship): 2.5% return rate
         - T10: 0% return rate
+        - High quality screen/casing: additional -0.25% each
         """
         base_rate = 5.0  # 5% base return rate
         screen_reduction = (self.screen_tier - 1) * 0.25
         casing_reduction = (self.casing_tier - 1) * 0.25
+
+        # Additional reduction for high quality components
+        if self.screen_quality == "High":
+            screen_reduction += 0.25
+        if self.casing_quality == "High":
+            casing_reduction += 0.25
+
         return_rate = base_rate - screen_reduction - casing_reduction
         return max(0.0, return_rate)  # Never go below 0%
 
@@ -341,19 +375,30 @@ class PhoneBlueprint:
 
     def display(self, global_tech_level: int = 1):
         """Display blueprint details"""
+        def quality_symbol(quality):
+            """Return a short symbol for quality"""
+            if quality == "Low":
+                return "L"
+            elif quality == "High":
+                return "H"
+            else:
+                return "N"
+
         score = self.calculate_score()
         tier_name = self.get_tier_name(global_tech_level)
 
         print(f"\n  Blueprint: {self.name}")
         print(f"  Market Tier: {tier_name} (Score: {score})")
-        print(f"  RAM: T{self.ram_tier} | SoC: T{self.soc_tier} | Screen: T{self.screen_tier} | Storage: T{self.storage_tier}")
-        print(f"  Battery: T{self.battery_tier} | Camera: T{self.camera_tier} | Casing: T{self.casing_tier}")
+        print(f"  RAM: T{self.ram_tier}({quality_symbol(self.ram_quality)}) | SoC: T{self.soc_tier}({quality_symbol(self.soc_quality)}) | Screen: T{self.screen_tier}({quality_symbol(self.screen_quality)}) | Storage: T{self.storage_tier}({quality_symbol(self.storage_quality)})")
+        print(f"  Battery: T{self.battery_tier}({quality_symbol(self.battery_quality)}) | Camera: T{self.camera_tier}({quality_symbol(self.camera_quality)}) | Casing: T{self.casing_tier}({quality_symbol(self.casing_quality)})")
         if self.fingerprint_tier > 0:
-            print(f"  Fingerprint: T{self.fingerprint_tier}")
+            print(f"  Fingerprint: T{self.fingerprint_tier}({quality_symbol(self.fingerprint_quality)})")
         else:
             print(f"  Fingerprint: None")
+        print(f"  Quality: L=Low (0.5x cost), N=Normal (1x cost), H=High (1.5x cost)")
         print(f"  Production Cost: ${self.get_production_cost()} | Sell Price: ${self.sell_price}")
         print(f"  Profit per unit: ${self.sell_price - self.get_production_cost()}")
+        print(f"  Repair Return Rate: {self.get_repair_return_rate():.2f}%")
 
 
 class Player:
@@ -630,6 +675,7 @@ class Player:
         return True
 
     def create_blueprint(self, name: str, parts: Dict[str, int], sell_price: int,
+                        quality: Dict[str, str] = None,
                         min_tier: int = 1, max_tier: int = MAX_TIER,
                         global_tech_level: int = 1) -> bool:
         """Create a new phone blueprint"""
@@ -668,6 +714,13 @@ class Player:
                 print(f"❌ Fingerprint T{fingerprint_tier} not yet unlocked (current: T{self.unlocked_tiers['fingerprint']})")
                 return False
 
+        # Set default quality to Normal if not provided
+        if quality is None:
+            quality = {}
+        for part in CORE_PARTS + OPTIONAL_PARTS:
+            if part not in quality:
+                quality[part] = "Normal"
+
         blueprint = PhoneBlueprint(
             name=name,
             ram_tier=parts['ram'],
@@ -678,7 +731,15 @@ class Player:
             casing_tier=parts['casing'],
             storage_tier=parts['storage'],
             fingerprint_tier=fingerprint_tier,
-            sell_price=sell_price
+            sell_price=sell_price,
+            ram_quality=quality['ram'],
+            soc_quality=quality['soc'],
+            screen_quality=quality['screen'],
+            battery_quality=quality['battery'],
+            camera_quality=quality['camera'],
+            casing_quality=quality['casing'],
+            storage_quality=quality['storage'],
+            fingerprint_quality=quality['fingerprint']
         )
 
         self.blueprints.append(blueprint)
@@ -919,8 +980,9 @@ class Player:
         """
         Calculate and apply monthly brand reputation changes based on:
         1. Build quality - cheap casing on flagship phones (-1 per month)
-        2. Price reliability - price swings over 3 months (-2 per month)
-        3. Rejected repairs (-1 per device, max -10 per month)
+        2. Component quality - low quality parts (-2), high quality parts (+2)
+        3. Price reliability - price swings over 3 months (-2 per month)
+        4. Rejected repairs (-1 per device, max -10 per month)
         """
         reputation_changes = []
         total_change = 0
@@ -936,7 +998,47 @@ class Player:
                     reputation_changes.append(f"  Cheap casing on {tier_name} phone '{blueprint.name}': -1")
                     total_change -= 1
 
-        # 2. Check price reliability - look for price swings over last 3 months
+        # 2. Check component quality across all products
+        has_low_quality = False
+        has_high_quality = False
+
+        for blueprint in self.blueprints:
+            # Check if any component uses low quality
+            if any([
+                blueprint.ram_quality == "Low",
+                blueprint.soc_quality == "Low",
+                blueprint.screen_quality == "Low",
+                blueprint.battery_quality == "Low",
+                blueprint.camera_quality == "Low",
+                blueprint.casing_quality == "Low",
+                blueprint.storage_quality == "Low",
+                blueprint.fingerprint_quality == "Low" if blueprint.fingerprint_tier > 0 else False
+            ]):
+                has_low_quality = True
+
+            # Check if any component uses high quality
+            if any([
+                blueprint.ram_quality == "High",
+                blueprint.soc_quality == "High",
+                blueprint.screen_quality == "High",
+                blueprint.battery_quality == "High",
+                blueprint.camera_quality == "High",
+                blueprint.casing_quality == "High",
+                blueprint.storage_quality == "High",
+                blueprint.fingerprint_quality == "High" if blueprint.fingerprint_tier > 0 else False
+            ]):
+                has_high_quality = True
+
+        # Apply quality-based reputation changes
+        if has_low_quality:
+            reputation_changes.append(f"  Low quality components in product lineup: -2")
+            total_change -= 2
+
+        if has_high_quality:
+            reputation_changes.append(f"  High quality components in product lineup: +2")
+            total_change += 2
+
+        # 3. Check price reliability - look for price swings over last 3 months
         for blueprint_name, price_records in self.price_history.items():
             # Only check if we have at least 3 months of data
             if len(price_records) >= 3:
@@ -957,7 +1059,7 @@ class Player:
                     reputation_changes.append(f"  Unreliable pricing for '{blueprint_name}': -2")
                     total_change -= 2
 
-        # 3. Apply rejected repairs penalty (capped at -10 per month)
+        # 4. Apply rejected repairs penalty (capped at -10 per month)
         if self.rejected_repairs_this_month > 0:
             penalty = min(self.rejected_repairs_this_month, 10)
             reputation_changes.append(f"  Rejected {self.rejected_repairs_this_month} repairs: -{penalty}")
@@ -1481,13 +1583,18 @@ class Game:
             return
 
         parts = {}
+        quality = {}
 
-        print("\nEnter tier for each core part:")
+        print("\nEnter tier and quality for each core part:")
+        print("Quality options: [L]ow (50% cheaper), [N]ormal (default), [H]igh (50% more expensive)")
+        print("Note: High quality screen/casing reduces repair rate by 0.25% each")
+        print()
+
         for part in CORE_PARTS:
             while True:
                 try:
                     max_available = min(player.unlocked_tiers[part], max_tier)
-                    tier = int(input(f"  {part.capitalize()} (T{min_tier}-T{max_available}): "))
+                    tier = int(input(f"  {part.capitalize()} tier (T{min_tier}-T{max_available}): "))
                     if min_tier <= tier <= max_available:
                         parts[part] = tier
                         break
@@ -1495,6 +1602,21 @@ class Game:
                         print(f"    Invalid. Must be between {min_tier} and {max_available}")
                 except ValueError:
                     print("    Invalid input")
+
+            # Ask for quality
+            while True:
+                quality_choice = input(f"  {part.capitalize()} quality ([L]ow/[N]ormal/[H]igh, default N): ").strip().upper()
+                if quality_choice == '' or quality_choice == 'N':
+                    quality[part] = "Normal"
+                    break
+                elif quality_choice == 'L':
+                    quality[part] = "Low"
+                    break
+                elif quality_choice == 'H':
+                    quality[part] = "High"
+                    break
+                else:
+                    print("    Invalid. Enter L, N, or H")
 
         # Optional fingerprint
         if player.unlocked_tiers['fingerprint'] > 0:
@@ -1511,8 +1633,26 @@ class Game:
                             print(f"    Invalid. Must be between {min_tier} and {max_available}")
                     except ValueError:
                         print("    Invalid input")
+
+                # Ask for fingerprint quality
+                while True:
+                    quality_choice = input(f"  Fingerprint quality ([L]ow/[N]ormal/[H]igh, default N): ").strip().upper()
+                    if quality_choice == '' or quality_choice == 'N':
+                        quality['fingerprint'] = "Normal"
+                        break
+                    elif quality_choice == 'L':
+                        quality['fingerprint'] = "Low"
+                        break
+                    elif quality_choice == 'H':
+                        quality['fingerprint'] = "High"
+                        break
+                    else:
+                        print("    Invalid. Enter L, N, or H")
+            else:
+                quality['fingerprint'] = "Normal"
         else:
             print("\nFingerprint sensor not available (need to R&D first)")
+            quality['fingerprint'] = "Normal"
 
         # Calculate phone score and tier
         score = 0
@@ -1575,7 +1715,7 @@ class Game:
             except ValueError:
                 print("Invalid input")
 
-        player.create_blueprint(name, parts, sell_price, min_tier, max_tier, self.global_tech_level)
+        player.create_blueprint(name, parts, sell_price, quality, min_tier, max_tier, self.global_tech_level)
 
     def menu_manufacturing(self, player: Player):
         """Manufacturing menu"""
