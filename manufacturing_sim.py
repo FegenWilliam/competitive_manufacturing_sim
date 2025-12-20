@@ -99,9 +99,13 @@ CUSTOMER_TIER_DISTRIBUTION = {
     'Flagship': 0.05,     # 5%
 }
 
-# Initial customer count and monthly growth
-INITIAL_CUSTOMER_COUNT = 1000
-CUSTOMER_GROWTH_PER_MONTH = 200
+# Market size - fixed at 20,000 people
+MARKET_SIZE = 20000
+
+# Phone lifecycle constants (in months)
+BASE_REPLACEMENT_TIME = 20  # Default replacement time
+GAMER_REPLACEMENT_TIME = 16  # Gamers replace faster
+CAMERA_CHECK_INTERVAL = 3  # Camera enthusiasts check every 3 months
 
 # Customer types and their preferences (weights for each component)
 CUSTOMER_TYPES = {
@@ -201,8 +205,57 @@ CUSTOMER_TYPES = {
 
 
 @dataclass
+class CustomerGroup:
+    """
+    Represents a group of similar customers in the market.
+    Groups customers by tier, type, and phone ownership for efficiency.
+    """
+    tier: str  # Entry Level, Budget, Midrange, High End, Flagship
+    customer_type: str  # Gamer, Camera Enthusiast, etc.
+    count: int  # Number of customers in this group
+
+    # Phone ownership (None if no phone owned)
+    owned_phone_company: Optional[str] = None  # Player name
+    owned_phone_blueprint: Optional[str] = None  # Blueprint name
+    purchase_month: Optional[int] = None  # When they bought it
+    last_camera_check_month: Optional[int] = None  # For camera enthusiasts
+
+    def to_dict(self):
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(data):
+        return CustomerGroup(**data)
+
+    def evaluate_phone(self, phone: 'PhoneBlueprint') -> float:
+        """
+        Evaluate a phone based on customer preferences.
+        Returns a satisfaction score.
+        """
+        preferences = CUSTOMER_TYPES[self.customer_type]
+        score = 0
+
+        # Evaluate each component based on preferences
+        score += phone.soc_tier * preferences['soc']
+        score += phone.ram_tier * preferences['ram']
+        score += phone.battery_tier * preferences['battery']
+        score += phone.screen_tier * preferences['screen']
+        score += phone.camera_tier * preferences['camera']
+        score += phone.storage_tier * preferences['storage']
+        score += phone.casing_tier * preferences['casing']
+
+        # Value hunters also consider price (lower price = better for them)
+        if self.customer_type == 'Value Hunter':
+            # Normalize price impact (assuming max reasonable price is 5000)
+            price_penalty = phone.sell_price / 5000 * 20
+            score -= price_penalty
+
+        return score
+
+
+@dataclass
 class Customer:
-    """Represents a customer in the market"""
+    """Represents a customer in the market (DEPRECATED - use CustomerGroup instead)"""
     tier: str  # Entry Level, Budget, Midrange, High End, Flagship
     customer_type: str  # Gamer, Camera Enthusiast, etc.
 
@@ -1150,105 +1203,236 @@ class Player:
 
 
 class CustomerMarket:
-    """Manages the customer market and purchasing behavior"""
+    """Manages the customer market with persistent phone ownership tracking"""
 
     def __init__(self):
-        self.customers: List[Customer] = []
+        self.customer_groups: List[CustomerGroup] = []
         self.current_month = 0
         self.sales_history: Dict[int, Dict[str, int]] = {}  # month -> {player_name: sales_count}
+        self.is_initialized = False
 
     def to_dict(self):
         """Convert market to dictionary"""
         return {
-            'customers': [c.to_dict() for c in self.customers],
+            'customer_groups': [g.to_dict() for g in self.customer_groups],
             'current_month': self.current_month,
             'sales_history': self.sales_history,
+            'is_initialized': self.is_initialized,
         }
 
     @staticmethod
     def from_dict(data):
         """Load market from dictionary"""
         market = CustomerMarket()
-        market.customers = [Customer.from_dict(c) for c in data.get('customers', [])]
+        market.customer_groups = [CustomerGroup.from_dict(g) for g in data.get('customer_groups', [])]
         market.current_month = data.get('current_month', 0)
         market.sales_history = data.get('sales_history', {})
+        market.is_initialized = data.get('is_initialized', False)
         return market
 
-    def generate_customers_for_month(self, month: int):
-        """Generate customers for a given month with fixed tier distribution"""
-        if month == 1:
-            total_customers = INITIAL_CUSTOMER_COUNT
+    def initialize_market(self):
+        """
+        Initialize the market with 20,000 people distributed by budget tier and personality type.
+        Everyone starts without owning a phone.
+        """
+        if self.is_initialized:
+            print("\n⚠️  Market already initialized!")
+            return
+
+        print(f"\n📊 Initializing market with {MARKET_SIZE} people...")
+
+        # Create customer groups distributed by tier and type
+        customer_types_list = list(CUSTOMER_TYPES.keys())
+        num_types = len(customer_types_list)
+
+        for tier_name, tier_percentage in CUSTOMER_TIER_DISTRIBUTION.items():
+            tier_count = int(MARKET_SIZE * tier_percentage)
+
+            # Distribute evenly across customer types within each tier
+            customers_per_type = tier_count // num_types
+            remainder = tier_count % num_types
+
+            for i, customer_type in enumerate(customer_types_list):
+                # Add remainder to first few types to reach exact count
+                count = customers_per_type + (1 if i < remainder else 0)
+
+                if count > 0:
+                    group = CustomerGroup(
+                        tier=tier_name,
+                        customer_type=customer_type,
+                        count=count
+                    )
+                    self.customer_groups.append(group)
+
+        self.is_initialized = True
+
+        print(f"  ✓ Created {len(self.customer_groups)} customer groups")
+        print(f"  Total people: {sum(g.count for g in self.customer_groups)}")
+
+        # Display distribution
+        print("\n  Distribution by tier:")
+        for tier_name, percentage in CUSTOMER_TIER_DISTRIBUTION.items():
+            count = sum(g.count for g in self.customer_groups if g.tier == tier_name)
+            print(f"    {tier_name}: {count} ({percentage*100:.0f}%)")
+
+        print("\n  Distribution by type:")
+        for customer_type in customer_types_list:
+            count = sum(g.count for g in self.customer_groups if g.customer_type == customer_type)
+            percentage = (count / MARKET_SIZE * 100) if MARKET_SIZE > 0 else 0
+            print(f"    {customer_type}: {count} ({percentage:.1f}%)")
+
+    def calculate_phone_lifecycle(self, blueprint: 'PhoneBlueprint', customer_type: str) -> int:
+        """
+        Calculate how many months a phone should last for a given customer type.
+
+        Base rules:
+        - Default: 20 months
+        - Gamer: 16 months (uses phone at max all the time)
+        - Others: 20 months base
+
+        Tier modifications (T3 is base/midrange):
+        - T4 parts: +1 month per part
+        - T2 parts: -1 month per part
+
+        Quality modifications:
+        - High quality: +1 month per high quality part
+        - Low quality: -1 month per low quality part
+
+        Special bonuses:
+        - Battery: Extra +1 month for high quality battery (total +2)
+        """
+        # Start with base time
+        if customer_type == 'Gamer':
+            base_time = GAMER_REPLACEMENT_TIME
         else:
-            total_customers = INITIAL_CUSTOMER_COUNT + (month - 1) * CUSTOMER_GROWTH_PER_MONTH
+            base_time = BASE_REPLACEMENT_TIME
 
-        # Clear existing customers
-        self.customers = []
+        # Count parts by tier (T3 is baseline midrange)
+        tier_bonus = 0
+        parts_tiers = [
+            blueprint.ram_tier,
+            blueprint.soc_tier,
+            blueprint.screen_tier,
+            blueprint.battery_tier,
+            blueprint.camera_tier,
+            blueprint.casing_tier,
+            blueprint.storage_tier,
+        ]
+        if blueprint.fingerprint_tier > 0:
+            parts_tiers.append(blueprint.fingerprint_tier)
 
-        # Generate customers based on fixed tier distribution
-        for tier_name, percentage in CUSTOMER_TIER_DISTRIBUTION.items():
-            count = int(total_customers * percentage)
+        for tier in parts_tiers:
+            if tier >= 4:  # T4 and above
+                tier_bonus += 1
+            elif tier <= 2:  # T2 and below
+                tier_bonus -= 1
 
-            for _ in range(count):
-                # Randomly assign customer type
-                customer_type = random.choice(list(CUSTOMER_TYPES.keys()))
-                customer = Customer(tier=tier_name, customer_type=customer_type)
-                self.customers.append(customer)
+        # Count quality bonuses/penalties
+        quality_bonus = 0
+        parts_qualities = [
+            blueprint.ram_quality,
+            blueprint.soc_quality,
+            blueprint.screen_quality,
+            blueprint.battery_quality,
+            blueprint.camera_quality,
+            blueprint.casing_quality,
+            blueprint.storage_quality,
+        ]
+        if blueprint.fingerprint_tier > 0:
+            parts_qualities.append(blueprint.fingerprint_quality)
 
-        self.current_month = month
+        for quality in parts_qualities:
+            if quality == "High":
+                quality_bonus += 1
+            elif quality == "Low":
+                quality_bonus -= 1
 
-        print(f"\n📊 Customer Market for Month {month}:")
-        print(f"  Total customers: {len(self.customers)}")
-        for tier_name, percentage in CUSTOMER_TIER_DISTRIBUTION.items():
-            count = int(total_customers * percentage)
-            print(f"  - {tier_name}: {count} ({int(percentage*100)}%)")
+        # Special battery bonus (high quality battery gets extra +1, total +2)
+        if blueprint.battery_quality == "High":
+            quality_bonus += 1
+
+        # Calculate total lifecycle
+        total_lifecycle = base_time + tier_bonus + quality_bonus
+
+        # Minimum 6 months
+        return max(6, total_lifecycle)
 
     def display_customer_breakdown(self):
-        """Display breakdown of customers by tier and type"""
+        """Display breakdown of customers by tier, type, and phone ownership"""
+        total_people = sum(g.count for g in self.customer_groups)
+
         print(f"\n📊 Customer Market Analysis (Month {self.current_month}):")
-        print(f"  Total customers: {len(self.customers)}")
+        print(f"  Total people: {total_people}")
 
         # Count by tier
         tier_counts = {}
-        for customer in self.customers:
-            tier_counts[customer.tier] = tier_counts.get(customer.tier, 0) + 1
+        for group in self.customer_groups:
+            tier_counts[group.tier] = tier_counts.get(group.tier, 0) + group.count
 
         print("\n  By Tier:")
         for tier in ['Entry Level', 'Budget', 'Midrange', 'High End', 'Flagship']:
             count = tier_counts.get(tier, 0)
-            percentage = (count / len(self.customers) * 100) if self.customers else 0
+            percentage = (count / total_people * 100) if total_people > 0 else 0
             print(f"    {tier}: {count} ({percentage:.1f}%)")
 
         # Count by type
         type_counts = {}
-        for customer in self.customers:
-            type_counts[customer.customer_type] = type_counts.get(customer.customer_type, 0) + 1
+        for group in self.customer_groups:
+            type_counts[group.customer_type] = type_counts.get(group.customer_type, 0) + group.count
 
         print("\n  By Type:")
         for customer_type in sorted(CUSTOMER_TYPES.keys()):
             count = type_counts.get(customer_type, 0)
-            percentage = (count / len(self.customers) * 100) if self.customers else 0
+            percentage = (count / total_people * 100) if total_people > 0 else 0
             print(f"    {customer_type}: {count} ({percentage:.1f}%)")
+
+        # Count phone ownership
+        people_with_phones = sum(g.count for g in self.customer_groups if g.owned_phone_company is not None)
+        people_without_phones = total_people - people_with_phones
+
+        print("\n  Phone Ownership:")
+        print(f"    With phones: {people_with_phones} ({people_with_phones/total_people*100:.1f}%)")
+        print(f"    Without phones: {people_without_phones} ({people_without_phones/total_people*100:.1f}%)")
+
+        # Show market share by company
+        if people_with_phones > 0:
+            company_counts = {}
+            for group in self.customer_groups:
+                if group.owned_phone_company:
+                    company_counts[group.owned_phone_company] = company_counts.get(group.owned_phone_company, 0) + group.count
+
+            print("\n  Market Share:")
+            for company, count in sorted(company_counts.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / people_with_phones * 100) if people_with_phones > 0 else 0
+                print(f"    {company}: {count} ({percentage:.1f}%)")
 
     def simulate_purchases(self, players: List[Player], global_tech_level: int):
         """
-        Simulate customer purchases from available phones.
-        Each customer buys one phone per month based on their tier and preferences.
+        Simulate customer purchases with persistent phone ownership tracking.
+        Customers only buy if:
+        1. They don't own a phone, OR
+        2. Their phone's lifecycle has expired, OR
+        3. (Camera Enthusiast only) A better camera tier is available
         """
         print(f"\n🛒 Simulating customer purchases for Month {self.current_month}...")
 
+        # Build blueprint lookup for all players
+        player_blueprints = {}  # player_name -> {blueprint_name -> blueprint}
+        for player in players:
+            player_blueprints[player.name] = {}
+            for bp in player.blueprints:
+                player_blueprints[player.name][bp.name] = bp
+
         # Collect all available phones from all players
-        available_phones = []  # List of (player, blueprint, quantity)
+        available_phones = []  # List of (player, blueprint)
+        inventory_tracker = {}  # (player_name, blueprint_name) -> available_count
         for player in players:
             for phone_name, quantity in player.manufactured_phones.items():
                 if quantity > 0:
-                    # Find the blueprint
-                    blueprint = None
-                    for bp in player.blueprints:
-                        if bp.name == phone_name:
-                            blueprint = bp
-                            break
+                    blueprint = player_blueprints[player.name].get(phone_name)
                     if blueprint:
-                        available_phones.append((player, blueprint, quantity))
+                        available_phones.append((player, blueprint))
+                        inventory_tracker[(player.name, phone_name)] = quantity
 
         if not available_phones:
             print("  ❌ No phones available for purchase!")
@@ -1262,30 +1446,87 @@ class CustomerMarket:
         # Track sales by phone
         sales_by_phone = {}  # (player_name, phone_name) -> count
 
-        # Each customer tries to buy a phone
-        for customer in self.customers:
-            # Find phones matching customer's tier
+        # Track brand reputation changes based on retention
+        retention_changes = {}  # player_name -> change
+        for player in players:
+            retention_changes[player.name] = 0
+
+        # Process each customer group
+        groups_to_split = []  # Groups that need to be split due to purchases
+
+        for group_idx, group in enumerate(self.customer_groups):
+            # Determine if this group should buy phones this month
+            should_buy_count = 0  # How many in this group should buy
+
+            if group.owned_phone_company is None:
+                # No phone owned - everyone in group wants to buy
+                should_buy_count = group.count
+            else:
+                # Check if phone lifecycle has expired
+                months_owned = self.current_month - group.purchase_month
+
+                # Get the blueprint they own
+                owned_blueprint = None
+                if group.owned_phone_company in player_blueprints:
+                    owned_blueprint = player_blueprints[group.owned_phone_company].get(group.owned_phone_blueprint)
+
+                if owned_blueprint:
+                    lifecycle = self.calculate_phone_lifecycle(owned_blueprint, group.customer_type)
+
+                    # Check lifecycle expiration
+                    if months_owned >= lifecycle:
+                        should_buy_count = group.count
+
+                        # Track retention for brand reputation
+                        if months_owned <= 12:
+                            retention_changes[group.owned_phone_company] -= group.count
+                        elif months_owned >= 24:
+                            retention_changes[group.owned_phone_company] += group.count
+
+                    # Special check for Camera Enthusiasts - they check every 3 months
+                    elif group.customer_type == 'Camera Enthusiast':
+                        # Check if it's time for camera check
+                        last_check = group.last_camera_check_month or group.purchase_month
+                        if self.current_month - last_check >= CAMERA_CHECK_INTERVAL:
+                            # Look for better camera tier
+                            current_camera_tier = owned_blueprint.camera_tier
+
+                            # Check if any available phone has better camera
+                            for player, blueprint in available_phones:
+                                phone_tier = blueprint.get_tier_name(global_tech_level)
+                                if phone_tier == group.tier and blueprint.camera_tier > current_camera_tier:
+                                    should_buy_count = group.count
+                                    # Track retention (switching before lifecycle)
+                                    if months_owned <= 12:
+                                        retention_changes[group.owned_phone_company] -= group.count
+                                    break
+
+                            # Update last camera check regardless of purchase
+                            group.last_camera_check_month = self.current_month
+
+            # If nobody in this group should buy, skip
+            if should_buy_count == 0:
+                continue
+
+            # Find phones matching this group's tier
             matching_phones = []
-            for player, blueprint, quantity in available_phones:
+            for player, blueprint in available_phones:
                 phone_tier = blueprint.get_tier_name(global_tech_level)
-                if phone_tier == customer.tier:
+                if phone_tier == group.tier:
                     matching_phones.append((player, blueprint))
 
             if not matching_phones:
                 continue  # No phones available in this tier
 
-            # Evaluate each phone based on customer preferences
+            # Evaluate each phone based on group preferences
             best_phone = None
             best_score = -float('inf')
             best_player = None
 
             for player, blueprint in matching_phones:
-                score = customer.evaluate_phone(blueprint)
+                score = group.evaluate_phone(blueprint)
 
                 # Apply brand reputation bonus
-                # At 100 brand: 20% boost (multiply by 1.2)
-                # At 50 brand: 10% boost (multiply by 1.1)
-                # At 0 brand: no boost (multiply by 1.0)
                 brand_multiplier = 1.0 + (player.brand_reputation / 100.0 * 0.2)
                 score *= brand_multiplier
 
@@ -1294,29 +1535,73 @@ class CustomerMarket:
                     best_phone = blueprint
                     best_player = player
 
-            # Purchase the best phone
+            # Purchase phones for this group
             if best_phone and best_player:
-                # Check if still available
-                if best_player.manufactured_phones.get(best_phone.name, 0) > 0:
-                    # Complete the purchase
-                    best_player.manufactured_phones[best_phone.name] -= 1
-                    best_player.money += best_phone.sell_price
+                inventory_key = (best_player.name, best_phone.name)
+                available_qty = inventory_tracker.get(inventory_key, 0)
+
+                if available_qty > 0:
+                    # Determine how many can actually buy (limited by inventory)
+                    actual_buy_count = min(should_buy_count, available_qty)
+
+                    # Complete the purchases
+                    best_player.manufactured_phones[best_phone.name] -= actual_buy_count
+                    best_player.money += best_phone.sell_price * actual_buy_count
 
                     # Track sold devices for repair calculations
                     if best_phone.name not in best_player.sold_devices:
                         best_player.sold_devices[best_phone.name] = 0
-                    best_player.sold_devices[best_phone.name] += 1
+                    best_player.sold_devices[best_phone.name] += actual_buy_count
 
                     # Track sales
-                    sales_by_player[best_player.name] += 1
+                    sales_by_player[best_player.name] += actual_buy_count
                     key = (best_player.name, best_phone.name)
-                    sales_by_phone[key] = sales_by_phone.get(key, 0) + 1
+                    sales_by_phone[key] = sales_by_phone.get(key, 0) + actual_buy_count
 
-                    # Update available_phones quantity
-                    for i, (p, bp, qty) in enumerate(available_phones):
-                        if p == best_player and bp.name == best_phone.name:
-                            available_phones[i] = (p, bp, qty - 1)
-                            break
+                    # Update inventory tracker
+                    inventory_tracker[inventory_key] -= actual_buy_count
+
+                    # Handle group splitting if needed
+                    if actual_buy_count < group.count:
+                        # Split the group: some bought, some didn't
+                        groups_to_split.append((group_idx, actual_buy_count, best_player.name, best_phone.name))
+                    else:
+                        # Everyone in the group bought
+                        group.owned_phone_company = best_player.name
+                        group.owned_phone_blueprint = best_phone.name
+                        group.purchase_month = self.current_month
+                        group.last_camera_check_month = self.current_month
+
+        # Handle group splits (process in reverse to maintain indices)
+        for group_idx, buy_count, company, blueprint_name in reversed(groups_to_split):
+            original_group = self.customer_groups[group_idx]
+
+            # Create new group for buyers
+            buyer_group = CustomerGroup(
+                tier=original_group.tier,
+                customer_type=original_group.customer_type,
+                count=buy_count,
+                owned_phone_company=company,
+                owned_phone_blueprint=blueprint_name,
+                purchase_month=self.current_month,
+                last_camera_check_month=self.current_month
+            )
+
+            # Update original group (non-buyers)
+            original_group.count -= buy_count
+
+            # Add buyer group
+            self.customer_groups.append(buyer_group)
+
+        # Apply brand reputation changes based on retention
+        for player in players:
+            change = retention_changes[player.name]
+            if change != 0:
+                player.brand_reputation = max(0, min(100, player.brand_reputation + change))
+                if change < 0:
+                    print(f"  ⚠️  {player.name} brand reputation: {change} (poor retention <12 months)")
+                else:
+                    print(f"  ✓ {player.name} brand reputation: +{change} (good retention ≥24 months)")
 
         # Store sales history
         self.sales_history[self.current_month] = sales_by_player
@@ -1324,6 +1609,8 @@ class CustomerMarket:
         # Display results
         print(f"\n💰 Sales Results for Month {self.current_month}:")
         total_sales = 0
+        total_people = sum(g.count for g in self.customer_groups)
+
         for player in players:
             sales = sales_by_player[player.name]
             total_sales += sales
@@ -1333,7 +1620,9 @@ class CustomerMarket:
             )
             print(f"  {player.name}: {sales} phones sold, ${revenue:,} revenue")
 
-        print(f"\n  Total market sales: {total_sales} / {len(self.customers)} customers ({total_sales/len(self.customers)*100:.1f}% market penetration)")
+        people_with_phones = sum(g.count for g in self.customer_groups if g.owned_phone_company is not None)
+        print(f"\n  Total sales: {total_sales} phones")
+        print(f"  Market penetration: {people_with_phones}/{total_people} ({people_with_phones/total_people*100:.1f}%) own phones")
 
         # Show detailed breakdown by phone
         if sales_by_phone:
@@ -1416,10 +1705,10 @@ class Game:
         print(f"{'='*60}")
 
         # 1. Simulate customer purchases for current month (BEFORE manufacturing completes)
-        if self.customer_market.customers:
+        if self.customer_market.customer_groups:
             self.customer_market.simulate_purchases(self.players, self.global_tech_level)
         else:
-            print("\n❌ No customer data yet for this month.")
+            print("\n❌ No customer data yet. Market needs to be initialized.")
 
         # 2. Complete manufacturing for all players (AFTER sales)
         print(f"\n--- Manufacturing Completion ---")
@@ -1486,8 +1775,8 @@ class Game:
             self.advance_global_tech()
             self.months_until_tech_advance = 36  # Reset counter
 
-        # 6. Generate customers for the new month
-        self.customer_market.generate_customers_for_month(self.global_month)
+        # 6. Update current month for market tracking
+        self.customer_market.current_month = self.global_month
 
         # Display countdown to next tech advancement
         years_remaining = self.months_until_tech_advance // 12
@@ -1548,8 +1837,9 @@ class Game:
                 name = f"Player {i+1}"
             self.players.append(Player(name))
 
-        # Generate initial customer market for month 1
-        self.customer_market.generate_customers_for_month(self.global_month)
+        # Initialize the market with 20,000 people
+        self.customer_market.initialize_market()
+        self.customer_market.current_month = self.global_month
 
         print(f"\n✓ Game setup complete with {num_players} player(s)")
 
@@ -2051,10 +2341,10 @@ class Game:
                 input("\nPress Enter to continue...")
 
             elif choice == '8':
-                if self.customer_market.customers:
+                if self.customer_market.customer_groups:
                     self.customer_market.display_customer_breakdown()
                 else:
-                    print("\n❌ No customer data yet. Advance to next month to generate customers.")
+                    print("\n❌ No customer data yet. Market needs to be initialized.")
                 input("\nPress Enter to continue...")
 
             elif choice == '9':
