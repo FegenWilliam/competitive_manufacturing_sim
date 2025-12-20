@@ -24,6 +24,7 @@ CORE_PARTS = ['ram', 'soc', 'screen', 'battery', 'camera', 'casing', 'storage']
 OPTIONAL_PARTS = ['fingerprint']
 ALL_PARTS = CORE_PARTS + OPTIONAL_PARTS
 MAX_TIER = 10
+MAX_BLUEPRINTS = 10
 STARTING_MONEY = 100000
 MANUFACTURING_LIMIT_PER_MONTH = 1000
 
@@ -679,6 +680,11 @@ class Player:
                         min_tier: int = 1, max_tier: int = MAX_TIER,
                         global_tech_level: int = 1) -> bool:
         """Create a new phone blueprint"""
+        # Check if max blueprints reached
+        if len(self.blueprints) >= MAX_BLUEPRINTS:
+            print(f"❌ Maximum blueprint limit reached ({MAX_BLUEPRINTS})! Delete a blueprint to create a new one.")
+            return False
+
         # Check if name already exists
         for bp in self.blueprints:
             if bp.name == name:
@@ -749,6 +755,52 @@ class Player:
 
         print(f"\n✓ Created blueprint: {name}")
         blueprint.display(global_tech_level)
+        return True
+
+    def delete_blueprint(self, blueprint_name: str) -> bool:
+        """Delete a phone blueprint"""
+        # Find blueprint
+        blueprint = None
+        for bp in self.blueprints:
+            if bp.name == blueprint_name:
+                blueprint = bp
+                break
+
+        if not blueprint:
+            print(f"❌ Blueprint '{blueprint_name}' not found!")
+            return False
+
+        # Check if there are manufactured phones
+        if blueprint_name in self.manufactured_phones and self.manufactured_phones[blueprint_name] > 0:
+            print(f"❌ Cannot delete blueprint '{blueprint_name}': {self.manufactured_phones[blueprint_name]} units in inventory!")
+            print("   Sell all units before deleting the blueprint.")
+            return False
+
+        # Check if there are pending repairs
+        if blueprint_name in self.pending_repairs and self.pending_repairs[blueprint_name] > 0:
+            print(f"❌ Cannot delete blueprint '{blueprint_name}': {self.pending_repairs[blueprint_name]} units awaiting repair!")
+            print("   Repair or reject all repairs before deleting the blueprint.")
+            return False
+
+        # Check if there are ongoing manufacturing jobs
+        for name, quantity, months_remaining in self.manufacturing_queue:
+            if name == blueprint_name:
+                print(f"❌ Cannot delete blueprint '{blueprint_name}': {quantity} units being manufactured!")
+                print("   Wait for manufacturing to complete before deleting the blueprint.")
+                return False
+
+        # Delete the blueprint
+        self.blueprints.remove(blueprint)
+
+        # Clean up related data
+        if blueprint_name in self.manufactured_phones:
+            del self.manufactured_phones[blueprint_name]
+        if blueprint_name in self.sold_devices:
+            del self.sold_devices[blueprint_name]
+        if blueprint_name in self.price_history:
+            del self.price_history[blueprint_name]
+
+        print(f"\n✓ Deleted blueprint: {blueprint_name}")
         return True
 
     def manufacture_phone(self, blueprint_name: str, quantity: int) -> bool:
@@ -998,9 +1050,9 @@ class Player:
                     reputation_changes.append(f"  Cheap casing on {tier_name} phone '{blueprint.name}': -1")
                     total_change -= 1
 
-        # 2. Check component quality across all products
-        has_low_quality = False
-        has_high_quality = False
+        # 2. Check component quality for each product
+        low_quality_count = 0
+        high_quality_count = 0
 
         for blueprint in self.blueprints:
             # Check if any component uses low quality
@@ -1014,7 +1066,7 @@ class Player:
                 blueprint.storage_quality == "Low",
                 blueprint.fingerprint_quality == "Low" if blueprint.fingerprint_tier > 0 else False
             ]):
-                has_low_quality = True
+                low_quality_count += 1
 
             # Check if any component uses high quality
             if any([
@@ -1027,16 +1079,18 @@ class Player:
                 blueprint.storage_quality == "High",
                 blueprint.fingerprint_quality == "High" if blueprint.fingerprint_tier > 0 else False
             ]):
-                has_high_quality = True
+                high_quality_count += 1
 
-        # Apply quality-based reputation changes
-        if has_low_quality:
-            reputation_changes.append(f"  Low quality components in product lineup: -2")
-            total_change -= 2
+        # Apply quality-based reputation changes (per product)
+        if low_quality_count > 0:
+            penalty = low_quality_count * 2
+            reputation_changes.append(f"  Low quality components in {low_quality_count} product(s): -{penalty}")
+            total_change -= penalty
 
-        if has_high_quality:
-            reputation_changes.append(f"  High quality components in product lineup: +2")
-            total_change += 2
+        if high_quality_count > 0:
+            bonus = high_quality_count * 2
+            reputation_changes.append(f"  High quality components in {high_quality_count} product(s): +{bonus}")
+            total_change += bonus
 
         # 3. Check price reliability - look for price swings over last 3 months
         for blueprint_name, price_records in self.price_history.items():
@@ -1567,6 +1621,51 @@ class Game:
             elif choice == '3':
                 break
 
+    def menu_manage_blueprints(self, player: Player):
+        """Manage blueprints menu"""
+        while True:
+            print("\n" + "="*60)
+            print("MANAGE BLUEPRINTS")
+            print("="*60)
+            print(f"Blueprints: {len(player.blueprints)}/{MAX_BLUEPRINTS}")
+            player.display_blueprints(self.global_tech_level)
+
+            if not player.blueprints:
+                print("\n❌ No blueprints to manage!")
+                input("\nPress Enter to continue...")
+                break
+
+            print("\nActions:")
+            print("1. Delete blueprint")
+            print("2. Back to main menu")
+
+            choice = input("\nChoice: ").strip()
+
+            if choice == '1':
+                print("\nSelect blueprint to delete:")
+                for i, bp in enumerate(player.blueprints, 1):
+                    tier_name = bp.get_tier_name(self.global_tech_level)
+                    print(f"{i}. {bp.name} [{tier_name}]")
+
+                try:
+                    bp_choice = int(input("\nBlueprint number (0 to cancel): ")) - 1
+                    if bp_choice == -1:
+                        print("❌ Cancelled")
+                    elif 0 <= bp_choice < len(player.blueprints):
+                        blueprint = player.blueprints[bp_choice]
+                        confirm = input(f"\n⚠️  Delete '{blueprint.name}'? This cannot be undone! (y/n): ").strip().lower()
+                        if confirm == 'y':
+                            player.delete_blueprint(blueprint.name)
+                        else:
+                            print("❌ Cancelled")
+                    else:
+                        print("❌ Invalid selection")
+                except ValueError:
+                    print("❌ Invalid input")
+
+            elif choice == '2':
+                break
+
     def menu_create_phone(self, player: Player):
         """Create phone blueprint menu"""
         min_tier, max_tier = self.get_available_tier_range()
@@ -1575,6 +1674,7 @@ class Game:
         print("CREATE PHONE BLUEPRINT")
         print("="*60)
         print(f"Current tech level: T{min_tier}-T{max_tier}")
+        print(f"Blueprints: {len(player.blueprints)}/{MAX_BLUEPRINTS}")
         player.display_unlocked_tiers()
 
         name = input("\nEnter blueprint name: ").strip()
@@ -1887,20 +1987,21 @@ class Game:
 
             print("\n--- MAIN MENU ---")
             print("1. Advance Month")
-            print("2. Create Phone Blueprint")
-            print("3. Manufacturing")
+            print(f"2. Create Phone Blueprint ({len(player.blueprints)}/{MAX_BLUEPRINTS})")
+            print("3. Manage Blueprints")
+            print("4. Manufacturing")
             # Show notification if there are pending repairs
             if player.pending_repairs:
                 total_pending = sum(player.pending_repairs.values())
-                print(f"4. Device Repairs (⚠️  {total_pending} devices awaiting repair)")
+                print(f"5. Device Repairs (⚠️  {total_pending} devices awaiting repair)")
             else:
-                print("4. Device Repairs")
-            print("5. R&D")
-            print("6. View Status")
-            print("7. View Customer Market")
-            print("8. Save Game")
-            print("9. Next Player" if len(self.players) > 1 else "9. (Single Player)")
-            print("10. Quit")
+                print("5. Device Repairs")
+            print("6. R&D")
+            print("7. View Status")
+            print("8. View Customer Market")
+            print("9. Save Game")
+            print("10. Next Player" if len(self.players) > 1 else "10. (Single Player)")
+            print("11. Quit")
 
             choice = input("\nChoice: ").strip()
 
@@ -1928,15 +2029,18 @@ class Game:
                 self.menu_create_phone(player)
 
             elif choice == '3':
-                self.menu_manufacturing(player)
+                self.menu_manage_blueprints(player)
 
             elif choice == '4':
-                self.menu_repairs(player)
+                self.menu_manufacturing(player)
 
             elif choice == '5':
-                self.menu_rnd(player)
+                self.menu_repairs(player)
 
             elif choice == '6':
+                self.menu_rnd(player)
+
+            elif choice == '7':
                 player.display_status()
                 player.display_unlocked_tiers()
                 player.display_ongoing_rnd()
@@ -1946,21 +2050,21 @@ class Game:
                 player.display_pending_repairs()
                 input("\nPress Enter to continue...")
 
-            elif choice == '7':
+            elif choice == '8':
                 if self.customer_market.customers:
                     self.customer_market.display_customer_breakdown()
                 else:
                     print("\n❌ No customer data yet. Advance to next month to generate customers.")
                 input("\nPress Enter to continue...")
 
-            elif choice == '8':
+            elif choice == '9':
                 filename = input("Enter filename (default: savegame.json): ").strip()
                 if not filename:
                     filename = "savegame.json"
                 self.save_game(filename)
                 input("\nPress Enter to continue...")
 
-            elif choice == '9':
+            elif choice == '10':
                 if len(self.players) > 1:
                     self.next_player()
                     print(f"\n>>> Switching to {self.get_current_player().name} <<<")
@@ -1970,7 +2074,7 @@ class Game:
                     print("Single player mode - no other players")
                     input("\nPress Enter to continue...")
 
-            elif choice == '10':
+            elif choice == '11':
                 confirm = input("\nQuit game? (y/n): ").strip().lower()
                 if confirm == 'y':
                     return 'quit'
